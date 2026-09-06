@@ -1,5 +1,5 @@
 import requests
-from bs4 import BeautifulSoup
+import re
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -11,6 +11,13 @@ from kivy.uix.scrollview import ScrollView
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
 
+def strip_tags(html):
+    text = re.sub(r'<[^>]+>', '', html)
+    text = text.replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
+    text = text.replace('&lt;', '<').replace('&gt;', '>')
+    return text.strip()
+
+
 def ask(query):
     try:
         r = requests.post(
@@ -19,16 +26,19 @@ def ask(query):
             headers=HEADERS,
             timeout=15
         )
-        soup = BeautifulSoup(r.text, "html.parser")
+        html = r.text
 
-        snippets = soup.find_all("a", class_="result__snippet")
-        if not snippets:
-            snippets = soup.find_all("div", class_="result__snippet")
+        matches = re.findall(
+            r'class="result__snippet"[^>]*>(.*?)</a>',
+            html,
+            re.DOTALL
+        )
 
-        if not snippets:
+        if not matches:
             return "نتیجه‌ای پیدا نشد."
 
-        text = " ".join(s.get_text() for s in snippets[:3])
+        snippets = [strip_tags(m) for m in matches[:3]]
+        text = " ".join(snippets)
         return text.strip()
 
     except Exception as e:
