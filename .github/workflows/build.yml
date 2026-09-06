@@ -32,6 +32,11 @@ jobs:
           pip install --upgrade pip
           pip install buildozer cython
 
+      - name: Pin pip version to avoid python-for-android bug
+        run: |
+          echo "pip<24.2" > $HOME/pip-constraints.txt
+          echo "PIP_CONSTRAINT=$HOME/pip-constraints.txt" >> $GITHUB_ENV
+
       - name: Accept Android SDK licenses
         run: |
           mkdir -p ~/.buildozer/android/platform
