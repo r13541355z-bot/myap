@@ -5,7 +5,7 @@ package.domain = org.example
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 0.1
-requirements = python3==3.11.8,kivy,requests,urllib3,certifi,idna,chardet
+requirements = python3==3.11.8,hostpython3==3.11.8,kivy,requests,urllib3,certifi,idna,chardet
 orientation = portrait
 osx.python_version = 3
 osx.kivy_version = 1.9.1
