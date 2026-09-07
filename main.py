@@ -1,5 +1,4 @@
 import requests
-import re
 
 from kivy.app import App
 from kivy.uix.boxlayout import BoxLayout
@@ -8,38 +7,32 @@ from kivy.uix.button import Button
 from kivy.uix.label import Label
 from kivy.uix.scrollview import ScrollView
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
-
-def strip_tags(html):
-    text = re.sub(r'<[^>]+>', '', html)
-    text = text.replace('&amp;', '&').replace('&quot;', '"').replace('&#39;', "'")
-    text = text.replace('&lt;', '<').replace('&gt;', '>')
-    return text.strip()
+HEADERS = {"User-Agent": "Mozilla/5.0 (Android; Mobile) SearchApp/1.0"}
 
 
 def ask(query):
     try:
-        r = requests.post(
-            "https://html.duckduckgo.com/html/",
-            data={"q": query},
-            headers=HEADERS,
-            timeout=15
-        )
-        html = r.text
+        url = "https://fa.wikipedia.org/w/api.php"
+        params = {
+            "action": "opensearch",
+            "search": query,
+            "limit": 1,
+            "namespace": 0,
+            "format": "json"
+        }
+        r = requests.get(url, params=params, headers=HEADERS, timeout=15)
+        data = r.json()
 
-        matches = re.findall(
-            r'class="result__snippet"[^>]*>(.*?)</a>',
-            html,
-            re.DOTALL
-        )
+        titles = data[1] if len(data) > 1 else []
+        if not titles:
+            return "پاسخی پیدا نشد."
 
-        if not matches:
-            return "نتیجه‌ای پیدا نشد."
+        title = titles[0]
 
-        snippets = [strip_tags(m) for m in matches[:3]]
-        text = " ".join(snippets)
-        return text.strip()
+        summary_url = "https://fa.wikipedia.org/api/rest_v1/page/summary/" + title
+        r2 = requests.get(summary_url, headers=HEADERS, timeout=15)
+        data2 = r2.json()
+        return data2.get("extract", "پاسخی پیدا نشد.")
 
     except Exception as e:
         return f"خطا: {e}"
@@ -50,7 +43,7 @@ class SearchApp(App):
         root = BoxLayout(orientation="vertical", padding=10, spacing=10)
 
         self.input_box = TextInput(
-            hint_text="سوال خود را بنویسید...",
+            hint_text="موضوع مورد نظر را بنویسید...",
             size_hint_y=None,
             height=50,
             multiline=False
