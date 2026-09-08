@@ -3,6 +3,7 @@ import requests
 
 from kivy.app import App
 from kivy.core.window import Window
+from kivy.core.text import LabelBase
 from kivy.clock import Clock
 from kivy.graphics import Color, RoundedRectangle
 from kivy.uix.boxlayout import BoxLayout
@@ -10,13 +11,17 @@ from kivy.uix.label import Label
 from kivy.uix.textinput import TextInput
 from kivy.uix.button import Button
 from kivy.uix.scrollview import ScrollView
+from kivy.utils import get_color_from_hex
+
+# ---------- Font ----------
+LabelBase.register(name='Vazir', fn_regular='Vazirmatn-Regular.ttf')
 
 # ---------- Theme ----------
-BG_COLOR = (0x0F / 255, 0x12 / 255, 0x20 / 255, 1)
-CARD_COLOR = (0x1B / 255, 0x1F / 255, 0x33 / 255, 1)
-ACCENT_COLOR = (0x6C / 255, 0x63 / 255, 0xFF / 255, 1)
-TEXT_COLOR = (0xF2 / 255, 0xF2 / 255, 0xF7 / 255, 1)
-MUTED_COLOR = (0x9A / 255, 0x9A / 255, 0xB0 / 255, 1)
+BG_COLOR = get_color_from_hex('#0F1220')
+CARD_COLOR = get_color_from_hex('#1B1F33')
+ACCENT_COLOR = get_color_from_hex('#6C63FF')
+TEXT_COLOR = get_color_from_hex('#F2F2F7')
+MUTED_COLOR = get_color_from_hex('#9A9AB0')
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Android; Mobile) SearchApp/1.0'}
 
