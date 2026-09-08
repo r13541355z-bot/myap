@@ -25,14 +25,13 @@ MUTED_COLOR = get_color_from_hex('#9A9AB0')
 
 HEADERS = {'User-Agent': 'Mozilla/5.0 (Android; Mobile) SearchApp/1.0'}
 
-# --- Gemini setup ---
-# نکته امنیتی: کلید API را در نسخه‌ی نهایی/عمومی اپ مستقیم توی کد قرار نده،
-# چون هرکسی apk رو دیکامپایل کنه می‌تونه کلید رو ببینه.
-GEMINI_API_KEY = 'AQ.Ab8RN6JtplJzZqQHi7KBTkn6oP1Pj7NGJySpfWaxHkHoeqCHjw'
-GEMINI_URL = (
-    'https://generativelanguage.googleapis.com/v1beta/models/'
-    'gemini-2.5-flash:generateContent?key=' + GEMINI_API_KEY
-)
+WIKI_SEARCH_URL = 'https://fa.wikipedia.org/w/api.php'
+WIKI_SUMMARY_URL = 'https://fa.wikipedia.org/api/rest_v1/page/summary/'
+
+NO_RESULT_MSG = 'پاسخی پیدا نشد.'
+NO_CONNECTION_MSG = 'اتصال به اینترنت برقرار نشد. وای\u200cفای یا دیتای موبایل را بررسی کنید.'
+TIMEOUT_MSG = 'درخواست بیش از حد طول کشید. دوباره تلاش کنید.'
+EMPTY_RESPONSE_MSG = 'پاسخ خالی از سرور دریافت شد. اتصال اینترنت را بررسی کنید.'
 
 
 class RoundedBox(BoxLayout):
@@ -50,26 +49,48 @@ class RoundedBox(BoxLayout):
 
 
 def ask(query):
-    """Send the query to Gemini and return plain-text answer or a Persian error message."""
+    """Search Persian Wikipedia for `query` and return a short summary, or a Persian error message."""
     try:
-        payload = {"contents": [{"parts": [{"text": query}]}]}
-        r = requests.post(GEMINI_URL, json=payload, headers=HEADERS, timeout=20)
+        # Step 1: find the best matching article title
+        search_params = {
+            'action': 'opensearch',
+            'search': query,
+            'limit': 1,
+            'namespace': 0,
+            'format': 'json',
+        }
+        r = requests.get(WIKI_SEARCH_URL, params=search_params, headers=HEADERS, timeout=15)
 
         if r.status_code != 200:
-            return f'خطای سرور ({r.status_code}): {r.text[:200]}'
+            return f'خطای سرور ({r.status_code}). اتصال اینترنت را بررسی کنید.'
         if not r.text.strip():
-            return 'پاسخ خالی از سرور دریافت شد. اتصال اینترنت گوشی را بررسی کنید.'
+            return EMPTY_RESPONSE_MSG
 
         data = r.json()
-        try:
-            return data['candidates'][0]['content']['parts'][0]['text'].strip()
-        except (KeyError, IndexError):
-            return 'پاسخی پیدا نشد.'
+        titles = data[1] if len(data) > 1 else []
+        if not titles:
+            return NO_RESULT_MSG
+
+        title = titles[0]
+
+        # Step 2: fetch a short summary for that title
+        r2 = requests.get(WIKI_SUMMARY_URL + title, headers=HEADERS, timeout=15)
+
+        if r2.status_code != 200:
+            return f'خطای سرور در دریافت خلاصه ({r2.status_code}).'
+        if not r2.text.strip():
+            return EMPTY_RESPONSE_MSG
+
+        data2 = r2.json()
+        return data2.get('extract', NO_RESULT_MSG) or NO_RESULT_MSG
 
     except requests.exceptions.ConnectionError:
-        return 'اتصال به اینترنت برقرار نشد. وای‌فای یا دیتای موبایل را بررسی کنید.'
+        return NO_CONNECTION_MSG
     except requests.exceptions.Timeout:
-        return 'درخواست بیش از حد طول کشید. دوباره تلاش کنید.'
+        return TIMEOUT_MSG
+    except ValueError:
+        # JSON decoding failed on a non-empty, non-JSON response
+        return EMPTY_RESPONSE_MSG
     except Exception as e:
         return f'خطا: {e}'
 
@@ -101,6 +122,7 @@ class SearchApp(App):
             background_color=(0, 0, 0, 0), cursor_color=ACCENT_COLOR,
             multiline=False, padding=[10, 14, 10, 14], base_direction='rtl',
         )
+        self.input_box.bind(on_text_validate=self.on_submit)
         input_card.add_widget(self.input_box)
 
         submit_btn = Button(
