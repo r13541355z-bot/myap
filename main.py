@@ -23,7 +23,7 @@ ACCENT_COLOR = get_color_from_hex('#6C63FF')
 TEXT_COLOR = get_color_from_hex('#F2F2F7')
 MUTED_COLOR = get_color_from_hex('#9A9AB0')
 
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Android; Mobile) SearchApp/1.0'}
+HEADERS = {'User-Agent': 'SearchAppPersian/1.0 (Android search assistant app; contact: myap-project)'}
 
 WIKI_SEARCH_URL = 'https://fa.wikipedia.org/w/api.php'
 WIKI_SUMMARY_URL = 'https://fa.wikipedia.org/api/rest_v1/page/summary/'
@@ -51,7 +51,6 @@ class RoundedBox(BoxLayout):
 def ask(query):
     """Search Persian Wikipedia for `query` and return a short summary, or a Persian error message."""
     try:
-        # Step 1: find the best matching article title
         search_params = {
             'action': 'opensearch',
             'search': query,
@@ -73,7 +72,6 @@ def ask(query):
 
         title = titles[0]
 
-        # Step 2: fetch a short summary for that title
         r2 = requests.get(WIKI_SUMMARY_URL + title, headers=HEADERS, timeout=15)
 
         if r2.status_code != 200:
@@ -89,7 +87,6 @@ def ask(query):
     except requests.exceptions.Timeout:
         return TIMEOUT_MSG
     except ValueError:
-        # JSON decoding failed on a non-empty, non-JSON response
         return EMPTY_RESPONSE_MSG
     except Exception as e:
         return f'خطا: {e}'
