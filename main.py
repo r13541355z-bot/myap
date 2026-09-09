@@ -1,5 +1,7 @@
 import threading
 import requests
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 from kivy.app import App
 from kivy.core.window import Window
@@ -34,6 +36,15 @@ TIMEOUT_MSG = 'درخواست بیش از حد طول کشید. دوباره ت�
 EMPTY_RESPONSE_MSG = 'پاسخ خالی از سرور دریافت شد. اتصال اینترنت را بررسی کنید.'
 
 
+def shape(text):
+    """Reshape Persian/Arabic text so letters connect properly when rendered by Kivy."""
+    try:
+        reshaped = arabic_reshaper.reshape(text)
+        return get_display(reshaped)
+    except Exception:
+        return text
+
+
 class RoundedBox(BoxLayout):
     def __init__(self, bg_color=CARD_COLOR, **kwargs):
         super().__init__(**kwargs)
@@ -51,6 +62,7 @@ class RoundedBox(BoxLayout):
 def ask(query):
     """Search Persian Wikipedia for `query` and return a short summary, or a Persian error message."""
     try:
+        # Step 1: find the best matching article title
         search_params = {
             'action': 'opensearch',
             'search': query,
@@ -72,6 +84,7 @@ def ask(query):
 
         title = titles[0]
 
+        # Step 2: fetch a short summary for that title
         r2 = requests.get(WIKI_SUMMARY_URL + title, headers=HEADERS, timeout=15)
 
         if r2.status_code != 200:
@@ -87,6 +100,7 @@ def ask(query):
     except requests.exceptions.Timeout:
         return TIMEOUT_MSG
     except ValueError:
+        # JSON decoding failed on a non-empty, non-JSON response
         return EMPTY_RESPONSE_MSG
     except Exception as e:
         return f'خطا: {e}'
@@ -99,12 +113,12 @@ class SearchApp(App):
         root = BoxLayout(orientation='vertical', padding=[20, 30, 20, 20], spacing=18)
 
         title = Label(
-            text='دستیار جستجو', font_name='Vazir', font_size='26sp',
+            text=shape('دستیار جستجو'), font_name='Vazir', font_size='26sp',
             bold=True, color=TEXT_COLOR, size_hint_y=None, height=50,
         )
 
         subtitle = Label(
-            text='یک موضوع بنویسید تا برایتان جستجو کنم', font_name='Vazir',
+            text=shape('یک موضوع بنویسید تا برایتان جستجو کنم'), font_name='Vazir',
             font_size='14sp', color=MUTED_COLOR, size_hint_y=None, height=26,
         )
 
@@ -114,7 +128,7 @@ class SearchApp(App):
         )
 
         self.input_box = TextInput(
-            hint_text='مثلاً: فرانسه', hint_text_color=MUTED_COLOR,
+            hint_text=shape('مثلاً: فرانسه'), hint_text_color=MUTED_COLOR,
             font_name='Vazir', font_size='16sp', foreground_color=TEXT_COLOR,
             background_color=(0, 0, 0, 0), cursor_color=ACCENT_COLOR,
             multiline=False, padding=[10, 14, 10, 14], base_direction='rtl',
@@ -123,7 +137,7 @@ class SearchApp(App):
         input_card.add_widget(self.input_box)
 
         submit_btn = Button(
-            text='جستجو', font_name='Vazir', font_size='16sp', bold=True,
+            text=shape('جستجو'), font_name='Vazir', font_size='16sp', bold=True,
             size_hint_y=None, height=52, background_normal='',
             background_color=ACCENT_COLOR, color=TEXT_COLOR,
         )
@@ -132,7 +146,7 @@ class SearchApp(App):
         result_card = RoundedBox(bg_color=CARD_COLOR, orientation='vertical', padding=[18, 18, 18, 18])
 
         self.result_label = Label(
-            text='جواب اینجا نشان داده می\u200cشود', font_name='Vazir', font_size='16sp',
+            text=shape('جواب اینجا نشان داده می\u200cشود'), font_name='Vazir', font_size='16sp',
             color=TEXT_COLOR, size_hint_y=None,
             text_size=(Window.width - 76, None), halign='right', valign='top', line_height=1.4,
         )
@@ -162,11 +176,11 @@ class SearchApp(App):
         query = self.input_box.text.strip()
         if not query:
             return
-        self.result_label.text = 'در حال جستجو...'
+        self.result_label.text = shape('در حال جستجو...')
         threading.Thread(target=self._run_query, args=(query,), daemon=True).start()
 
     def _run_query(self, query):
-        answer = ask(query)
+        answer = shape(ask(query))
         Clock.schedule_once(lambda dt: setattr(self.result_label, 'text', answer))
 
 
