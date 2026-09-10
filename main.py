@@ -18,12 +18,14 @@ from kivy.utils import get_color_from_hex
 # ---------- Font ----------
 LabelBase.register(name='Vazir', fn_regular='Vazirmatn-Regular.ttf')
 
-# ---------- Theme ----------
-BG_COLOR = get_color_from_hex('#0F1220')
-CARD_COLOR = get_color_from_hex('#1B1F33')
-ACCENT_COLOR = get_color_from_hex('#6C63FF')
-TEXT_COLOR = get_color_from_hex('#F2F2F7')
-MUTED_COLOR = get_color_from_hex('#9A9AB0')
+# ---------- Theme (Light / Modern) ----------
+BG_COLOR = get_color_from_hex('#F7F8FC')
+CARD_COLOR = get_color_from_hex('#FFFFFF')
+CARD_BORDER = get_color_from_hex('#E7E9F5')
+ACCENT_COLOR = get_color_from_hex('#6C5CE7')
+ACCENT_SOFT = get_color_from_hex('#EFEBFF')
+TEXT_COLOR = get_color_from_hex('#1E2130')
+MUTED_COLOR = get_color_from_hex('#8B8FA3')
 
 HEADERS = {'User-Agent': 'SearchAppPersian/1.0 (Android search assistant app; contact: myap-project)'}
 
@@ -46,17 +48,24 @@ def shape(text):
 
 
 class RoundedBox(BoxLayout):
-    def __init__(self, bg_color=CARD_COLOR, **kwargs):
+    def __init__(self, bg_color=CARD_COLOR, border_color=CARD_BORDER, **kwargs):
         super().__init__(**kwargs)
         self.bg_color = bg_color
+        self.border_color = border_color
         with self.canvas.before:
+            # soft shadow
+            Color(0, 0, 0, 0.05)
+            self.shadow = RoundedRectangle(pos=(self.x, self.y - 3), size=self.size, radius=[18])
+            # card background
             Color(*self.bg_color)
-            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[16])
+            self.rect = RoundedRectangle(pos=self.pos, size=self.size, radius=[18])
         self.bind(pos=self.update_rect, size=self.update_rect)
 
     def update_rect(self, *args):
         self.rect.pos = self.pos
         self.rect.size = self.size
+        self.shadow.pos = (self.x, self.y - 3)
+        self.shadow.size = self.size
 
 
 def ask(query):
@@ -139,7 +148,7 @@ class SearchApp(App):
         submit_btn = Button(
             text=shape('جستجو'), font_name='Vazir', font_size='16sp', bold=True,
             size_hint_y=None, height=52, background_normal='',
-            background_color=ACCENT_COLOR, color=TEXT_COLOR,
+            background_color=ACCENT_COLOR, color=get_color_from_hex('#FFFFFF'),
         )
         submit_btn.bind(on_release=self.on_submit)
 
