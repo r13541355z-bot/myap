@@ -4,7 +4,10 @@
 منطق جستجو (ویکی‌پدیای فارسی) همان نسخه‌ی قبلی است؛ فقط رابط کاربری بازطراحی شده.
 برای اتصال به چت‌بات بعداً فقط تابع ask() را عوض کنید.
 """
+import ast
 import math
+import operator
+import re
 import threading
 from urllib.parse import quote
 
@@ -60,11 +63,31 @@ NO_CONNECTION_MSG = "اتصال به اینترنت برقرار نشد. وای�
 TIMEOUT_MSG = "درخواست بیش از حد طول کشید. دوباره تلاش کنید."
 EMPTY_RESPONSE_MSG = "پاسخ خالی از سرور دریافت شد. اتصال اینترنت را بررسی کنید."
 
+# ── اتصال به Ollama روی همین گوشی (Termux) ──
+OLLAMA_URL = "http://127.0.0.1:11434"
+OLLAMA_MODEL = "qwen2.5:1.5b"    # اگر گوشی قوی است (۸ گیگ+): qwen2.5:3b
+OLLAMA_TIMEOUT = 300             # روی گوشی کند است، بار اول لود مدل هم طول می‌کشد
+NO_AI_MSG = ("مدل هوش مصنوعی در دسترس نیست. برنامه‌ی Termux را باز کنید و دستور "
+             "ollama serve را اجرا کنید، بعد دوباره امتحان کنید.")
+
+MODES = {
+    "math": (0.1, "تو معلم ریاضی دقیقی. مسئله را کوتاه و مرحله‌به‌مرحله به فارسی حل کن و "
+                  "جواب نهایی را واضح بنویس. اگر «نتیجه‌ی محاسبه‌ی دقیق» داده شد همان را جواب نهایی بدان."),
+    "joke": (0.9, "تو طنزپرداز بامزه‌ای. یک جوک کوتاه و تمیز به فارسی بگو."),
+    "cook": (0.5, "تو سرآشپز ایرانی باتجربه‌ای. مواد لازم و مراحل پخت را کوتاه و شماره‌دار به فارسی بنویس."),
+    "research": (0.3, "تو پژوهشگر دقیقی. با تکیه بر متن مرجع، کوتاه و منظم به فارسی پاسخ بده و چیزی خارج از مرجع را قطعی ادعا نکن."),
+    "chat": (0.5, "تو دستیار هوشمند فارسی‌زبانی. روان، کوتاه و دقیق پاسخ بده و اگر نمی‌دانی صادقانه بگو."),
+}
+KW_JOKE = ("جوک", "شوخی", "بخندون", "لطیفه")
+KW_COOK = ("دستور پخت", "طرز تهیه", "آشپزی", "غذا", "پخت", "مواد لازم")
+KW_MATH = ("حل کن", "مشتق", "انتگرال", "معادله", "ریاضی", "محاسبه", "ساده کن")
+KW_RESEARCH = ("تحقیق", "درباره", "کیست", "چیست", "چه کسی", "تاریخچه", "توضیح بده")
+
 SUGGESTIONS = [
-    "حافظ شیرازی",
-    "هوش مصنوعی",
-    "منظومه شمسی",
-    "تخت جمشید",
+    "حل کن: 2x + 6 = 14",
+    "یک جوک بگو",
+    "طرز تهیه قورمه‌سبزی",
+    "درباره‌ی حافظ شیرازی تحقیق کن",
 ]
 
 Window.clearcolor = BG
@@ -82,8 +105,8 @@ def shape(text):
 
 
 # ───────────────────────── منطق جستجو (بدون تغییر) ─────────────────────────
-def ask(query):
-    """خروجی: dict با کلیدهای text, title, error. این تابع را بعداً به چت‌بات وصل کنید."""
+def wiki_lookup(query):
+    """جستجو در ویکی‌پدیا. خروجی: dict با کلیدهای text, title, error."""
     def fail(msg):
         return {"text": msg, "title": None, "error": True}
 
@@ -130,6 +153,95 @@ def ask(query):
         return fail(EMPTY_RESPONSE_MSG)
     except Exception as e:
         return fail("خطا: " + str(e))
+
+
+# ── محاسبه‌ی دقیق عبارت‌های عددی ساده (بدون eval، فقط ast) ──
+_FA = str.maketrans("۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩", "01234567890123456789")
+_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+        ast.Div: operator.truediv, ast.Pow: operator.pow, ast.USub: operator.neg}
+
+
+def _ev(n):
+    if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+        return n.value
+    if isinstance(n, ast.BinOp) and type(n.op) in _OPS:
+        l, r = _ev(n.left), _ev(n.right)
+        if isinstance(n.op, ast.Pow) and abs(r) > 100:
+            raise ValueError("pow")
+        return _OPS[type(n.op)](l, r)
+    if isinstance(n, ast.UnaryOp) and type(n.op) in _OPS:
+        return _OPS[type(n.op)](_ev(n.operand))
+    raise ValueError("bad")
+
+
+def safe_calc(text):
+    t = text.translate(_FA).replace("×", "*").replace("÷", "/").replace("^", "**")
+    found = re.findall(r"[0-9+\-*/().\s]{3,}", t)
+    if not found:
+        return None
+    expr = max(found, key=len).strip()
+    if len(expr) > 60 or not re.search(r"\d\s*(?:\*\*|[+\-*/])\s*\(?\d", expr):
+        return None
+    if re.fullmatch(r"\d{1,4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,4}", expr):
+        return None  # تاریخ
+    try:
+        v = _ev(ast.parse(expr, mode="eval").body)
+        return str(int(v)) if float(v).is_integer() else str(round(v, 8))
+    except Exception:
+        return None
+
+
+def detect_mode(msg):
+    if any(k in msg for k in KW_JOKE):
+        return "joke"
+    if any(k in msg for k in KW_COOK):
+        return "cook"
+    if any(k in msg for k in KW_MATH) or safe_calc(msg) is not None:
+        return "math"
+    if any(k in msg for k in KW_RESEARCH):
+        return "research"
+    return "chat"
+
+
+def ask_ollama(system, user, temperature):
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    r = requests.post(OLLAMA_URL + "/api/chat", json=payload, timeout=OLLAMA_TIMEOUT)
+    r.raise_for_status()
+    return (r.json().get("message", {}).get("content") or "").strip()
+
+
+def ask(query):
+    """تشخیص نوع سؤال -> (ویکی‌پدیا/محاسبه) -> مدل روی خود گوشی."""
+    mode = detect_mode(query)
+    temperature, system = MODES[mode]
+    user, title, wiki = query, None, None
+
+    if mode == "math":
+        exact = safe_calc(query)
+        if exact is not None:
+            user = query + "\n\nنتیجه‌ی محاسبه‌ی دقیق: " + exact
+    elif mode == "research":
+        wiki = wiki_lookup(query)
+        if not wiki["error"]:
+            title = wiki["title"]
+            user = "متن مرجع (ویکی‌پدیا):\n" + wiki["text"] + "\n\nسؤال: " + query
+
+    try:
+        answer = ask_ollama(system, user, temperature)
+        if answer:
+            return {"text": answer, "title": title, "error": False}
+        raise ValueError("empty")
+    except requests.exceptions.Timeout:
+        return {"text": TIMEOUT_MSG, "title": None, "error": True}
+    except Exception:
+        if wiki and not wiki["error"]:  # پشتیبان: خود متن ویکی‌پدیا
+            return wiki
+        return {"text": NO_AI_MSG, "title": None, "error": True}
 
 
 # ───────────────────────── ویجت‌های پایه ─────────────────────────
