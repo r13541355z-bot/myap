@@ -5,6 +5,7 @@
 برای اتصال به چت‌بات بعداً فقط تابع ask() را عوض کنید.
 """
 import ast
+import json
 import math
 import operator
 import re
@@ -67,6 +68,10 @@ EMPTY_RESPONSE_MSG = "پاسخ خالی از سرور دریافت شد. اتص�
 OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_MODEL = "qwen2.5:1.5b"    # اگر گوشی قوی است (۸ گیگ+): qwen2.5:3b
 OLLAMA_TIMEOUT = 300             # روی گوشی کند است، بار اول لود مدل هم طول می‌کشد
+MAX_TOKENS = 300                 # سقف طول پاسخ؛ کمتر = سریع‌تر
+CONTEXT_SIZE = 2048              # کوچک‌تر = سریع‌تر و کم‌مصرف‌تر
+KEEP_ALIVE = "30m"               # مدل تا ۳۰ دقیقه در حافظه می‌ماند (بدون لود دوباره)
+WIKI_CONTEXT_CHARS = 700         # مرجع ویکی‌پدیا کوتاه می‌شود تا مدل سریع‌تر بخواند
 NO_AI_MSG = ("مدل هوش مصنوعی در دسترس نیست. برنامه‌ی Termux را باز کنید و دستور "
              "ollama serve را اجرا کنید، بعد دوباره امتحان کنید.")
 
@@ -203,19 +208,32 @@ def detect_mode(msg):
     return "chat"
 
 
-def ask_ollama(system, user, temperature):
+def ask_ollama(system, user, temperature, push=None):
+    """پاسخ را تکه‌تکه (stream) می‌گیرد تا متن همان لحظه نمایش داده شود."""
     payload = {
         "model": OLLAMA_MODEL,
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        "stream": False,
-        "options": {"temperature": temperature},
+        "stream": True,
+        "keep_alive": KEEP_ALIVE,
+        "options": {"temperature": temperature, "num_predict": MAX_TOKENS, "num_ctx": CONTEXT_SIZE},
     }
-    r = requests.post(OLLAMA_URL + "/api/chat", json=payload, timeout=OLLAMA_TIMEOUT)
-    r.raise_for_status()
-    return (r.json().get("message", {}).get("content") or "").strip()
+    acc = ""
+    with requests.post(OLLAMA_URL + "/api/chat", json=payload, stream=True,
+                       timeout=(10, OLLAMA_TIMEOUT)) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line:
+                continue
+            d = json.loads(line)
+            acc += d.get("message", {}).get("content", "")
+            if push and acc:
+                push(acc)
+            if d.get("done"):
+                break
+    return acc.strip()
 
 
-def ask(query):
+def ask(query, push=None):
     """تشخیص نوع سؤال -> (ویکی‌پدیا/محاسبه) -> مدل روی خود گوشی."""
     mode = detect_mode(query)
     temperature, system = MODES[mode]
@@ -229,10 +247,13 @@ def ask(query):
         wiki = wiki_lookup(query)
         if not wiki["error"]:
             title = wiki["title"]
-            user = "متن مرجع (ویکی‌پدیا):\n" + wiki["text"] + "\n\nسؤال: " + query
+            ctx = wiki["text"]
+            if len(ctx) > WIKI_CONTEXT_CHARS:
+                ctx = ctx[:WIKI_CONTEXT_CHARS].rsplit(" ", 1)[0] + "…"
+            user = "متن مرجع (ویکی‌پدیا):\n" + ctx + "\n\nسؤال: " + query
 
     try:
-        answer = ask_ollama(system, user, temperature)
+        answer = ask_ollama(system, user, temperature, push)
         if answer:
             return {"text": answer, "title": title, "error": False}
         raise ValueError("empty")
@@ -578,6 +599,7 @@ class SearchApp(App):
         )
         bub.add_widget(lbl)
         bub.label = lbl
+        bub.max_inner, bub.padx, bub.pady = max_inner, padx, pady
         return bub
 
     def _row(self, widget, side):
@@ -614,50 +636,60 @@ class SearchApp(App):
 
         self.typing = TypingBubble()
         self.typing_row = self._row(self.typing, "left")
+        self.stream_bub = None
+        self._pending = False
+        self._latest = ""
 
         threading.Thread(target=self._run_query, args=(query,), daemon=True).start()
         Clock.schedule_once(lambda dt: setattr(self.input, "focus", True), 0.1)
 
+    # ---------- پاسخ زنده (stream) ----------
     def _run_query(self, query):
-        result = ask(query)
-        Clock.schedule_once(lambda dt: self._show_answer(result), 0)
+        def push(text):
+            self._latest = text
+            if not self._pending:
+                self._pending = True
+                Clock.schedule_once(self._flush, 0.12)
 
-    def _show_answer(self, res):
+        result = ask(query, push)
+        Clock.schedule_once(lambda dt: self._finish(result), 0.25)
+
+    def _drop_typing(self):
         if self.typing is not None:
             self.typing.stop()
             self.chat.remove_widget(self.typing_row)
             self.typing = None
 
-        kind = "error" if res["error"] else "bot"
-        bub = self._bubble(res["text"], kind, animate=not res["error"])
-        self._row(bub, "left")
+    def _set_bot_text(self, text, kind="bot"):
+        if self.stream_bub is None:
+            self._drop_typing()
+            self.stream_bub = self._bubble(text, kind)
+            self._row(self.stream_bub, "left")
+        else:
+            b = self.stream_bub
+            b.label.set_text(text, b.max_inner)
+            b.size = (b.label.width + 2 * b.padx, b.label.height + 2 * b.pady)
+        self._scroll_bottom()
 
-        def done():
-            self.busy = False
-            self.send_btn.opacity = 1
+    def _flush(self, dt):
+        self._pending = False
+        if self._latest:
+            self._set_bot_text(self._latest)
+
+    def _finish(self, res):
+        if res["error"]:
+            self._drop_typing()
+            if self.stream_bub is None:
+                self._row(self._bubble(res["text"], "error"), "left")
+        else:
+            self._set_bot_text(res["text"])
             if res.get("title"):
                 short = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
                 self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, short), "source"), "left")
-            self._scroll_bottom()
-
-        if res["error"]:
-            done()
-            return
-
-        lbl, total = bub.label, bub.label.total_chars()
-        step = max(3, total // 90)
-        state = {"n": 0}
-
-        def tick(dt):
-            state["n"] += step
-            lbl.reveal(state["n"])
-            self._scroll_bottom()
-            if state["n"] >= total:
-                lbl.reveal(total)
-                done()
-                return False
-
-        Clock.schedule_interval(tick, 0.02)
+        self.stream_bub = None
+        self.busy = False
+        self.send_btn.opacity = 1
+        self._scroll_bottom()
 
 
 if __name__ == "__main__":
