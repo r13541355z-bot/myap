@@ -361,7 +361,7 @@ def pick_joke():
     return JOKES[i]
 
 
-def ask(query, push=None, history=None, cancel=None):
+def _ask_impl(query, push=None, history=None, cancel=None):
     """سریع‌ترین مسیر ممکن: فوری (بدون مدل) -> کش -> مدل."""
     q = query.strip()
     ok = lambda text, title=None: {"text": text, "title": title, "error": False}
@@ -414,6 +414,13 @@ def ask(query, push=None, history=None, cancel=None):
         if wiki and not wiki["error"]:
             return wiki
         return {"text": NO_AI_MSG, "title": None, "error": True}
+
+
+def ask(query, push=None, history=None, cancel=None):
+    try:
+        return _ask_impl(query, push, history, cancel)
+    except Exception as e:                      # هرگز بی‌صدا گیر نکند
+        return {"text": "خطای غیرمنتظره: " + str(e), "title": None, "error": True}
 
 
 # ═════════════════════════ ویجت‌ها ═════════════════════════
@@ -612,7 +619,7 @@ class SearchApp(App):
         return True            # با رفتن به Termux برنامه بسته نشود
 
     def on_resume(self):
-        if self.status_kind != "ready":
+        if self.status_kind not in ("ready", "busy"):
             self.warm_up()
 
     def on_start(self):
@@ -694,6 +701,7 @@ class SearchApp(App):
         table = {
             "loading": (ORANGE, "آماده‌سازی…"),
             "ready": (GREEN, "آماده"),
+            "busy": (ACCENT_2, "در حال پاسخ…"),
             "off": (RED, "سرور خاموش"),
             "nomodel": (RED, "مدل نصب نیست"),
         }
@@ -718,7 +726,9 @@ class SearchApp(App):
                         return
                     requests.post(OLLAMA_URL + "/api/generate",
                                   json={"model": OLLAMA_MODEL, "prompt": "", "stream": False,
-                                        "keep_alive": KEEP_ALIVE}, timeout=OLLAMA_TIMEOUT)
+                                        "keep_alive": KEEP_ALIVE,
+                                        "options": {"num_ctx": CONTEXT_SIZE}},
+                                  timeout=OLLAMA_TIMEOUT)
                     st("ready")
                     return
             except Exception:
@@ -806,6 +816,7 @@ class SearchApp(App):
             return
         self.busy = True
         self.send_btn.set_stop(True)
+        self.set_status("busy")
         self.input.text = ""
         if self.welcome is not None:
             self.chat.remove_widget(self.welcome)
@@ -835,6 +846,8 @@ class SearchApp(App):
         self.stream_bub = None
         self.busy = False
         self.send_btn.set_stop(False)
+        if self.status_kind == "busy":
+            self.set_status("ready")
 
     def new_chat(self):
         self.stop_generation()
@@ -896,6 +909,8 @@ class SearchApp(App):
         self.stream_bub = None
         self.busy = False
         self.send_btn.set_stop(False)
+        if self.status_kind == "busy":
+            self.set_status("ready")
         self._scroll_bottom()
 
 
