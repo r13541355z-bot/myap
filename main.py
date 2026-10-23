@@ -51,11 +51,12 @@ OLLAMA_MODEL = "qwen3:4b-instruct-2507-q4_K_M"   # سریع‌تر: qwen3:1.7b |
 OLLAMA_TIMEOUT = 300
 CONTEXT_SIZE = 3072                  # کوچک‌تر = سریع‌تر
 KEEP_ALIVE = "30m"                   # مدل تا ۳۰ دقیقه در حافظه می‌ماند
-WIKI_CONTEXT_CHARS = 1000
-RETRIEVE_DOCS = 2                    # تعداد مقاله‌ی مرجع برای هر سؤال
-DOC_CHARS = 480                      # طول خلاصه‌ی هر مقاله
+WIKI_CONTEXT_CHARS = 450
+RETRIEVE_DOCS = 1                    # تعداد مقاله‌ی مرجع برای هر سؤال
+DOC_CHARS = 380                      # طول خلاصه‌ی هر مقاله
 HISTORY_MESSAGES = 4                 # تعداد پیام‌های قبلیِ یادآوری‌شده
-MODE_TOKENS = {"math": 300, "joke": 150, "cook": 420, "research": 260, "chat": 340}
+MODE_TOKENS = {"math": 220, "joke": 120, "cook": 300, "research": 230, "chat": 260}
+RESEARCH_CHARS = 1300                # طول متن مقاله‌ی ویکی‌پدیا برای تحقیق
 
 HEADERS = {"User-Agent": "SearchAppPersian/1.0 (student project)"}
 WIKI_SEARCH_URL = "https://fa.wikipedia.org/w/api.php"
@@ -102,30 +103,19 @@ def shape(text):
 
 
 # ═════════════════════════ دستورِ مدل (پرامپت‌ها) ═════════════════════════
-RULES = (
-    " قوانین: فقط به فارسی ساده، روان و درست بنویس؛ هرگز از حروف چینی یا کلمه‌های غیرفارسی استفاده نکن "
-    "(مگر نام خاص یا اصطلاح فنی). اول جواب مستقیم را بگو و بعد در صورت لزوم توضیح کوتاه بده. "
-    "منطقی و بدون تناقض بنویس و حرف بی‌ربط یا شعار نساز. اگر مطمئن نیستی صادقانه بگو نمی‌دانم و "
-    "چیزی اختراع نکن. اگر سؤال مبهم است، یک سؤال کوتاه برای روشن شدنش بپرس."
-)
-REF_RULE = (" اگر «متن مرجع» مرتبط با سؤال است، پاسخ را بر پایه‌ی آن بنویس و واقعیت‌ها را از آن بگیر؛ "
-            "اگر نامرتبط است نادیده‌اش بگیر و از دانش خودت با احتیاط جواب بده.")
+RULES = " فقط فارسی ساده و درست بنویس (بدون حروف چینی). اول جواب مستقیم، بعد توضیح کوتاه. چیزی اختراع نکن؛ اگر نمی‌دانی بگو."
+REF_RULE = " از «متن مرجع» برای پاسخ استفاده کن؛ اگر نامرتبط بود نادیده بگیر."
 MODES = {
-    "math": (0.1, "تو معلم ریاضی دقیقی. مسئله را کوتاه و مرحله‌به‌مرحله حل کن و جواب نهایی را "
-                  "واضح بنویس. اگر «نتیجه‌ی محاسبه‌ی دقیق» داده شد همان را جواب نهایی بدان." + RULES),
+    "math": (0.1, "تو معلم ریاضی دقیقی. کوتاه و مرحله‌به‌مرحله حل کن. اگر «نتیجه‌ی دقیق» داده شد همان جواب نهایی است." + RULES),
     "joke": (0.9, "تو طنزپرداز بامزه‌ای. یک جوک کوتاه و تمیز بگو." + RULES),
-    "cook": (0.4, "تو سرآشپز ایرانی باتجربه‌ای. مواد لازم و مراحل پخت را کوتاه و شماره‌دار بنویس." + RULES),
-    "research": (0.2, "تو پژوهشگر دقیق و بی‌طرفی. مسئله را بررسی کن و پاسخی روشن و منظم بده." + RULES),
-    "chat": (0.3, "تو دستیار هوشمند، صمیمی و دقیقی هستی که آزادانه گفتگو می‌کنی و به همه‌ی سؤال‌ها "
-                  "پاسخ می‌دهی. وقتی کاربر راهنمایی یا برنامه می‌خواهد، ۳ تا ۵ پیشنهاد مشخص، "
-                  "کاربردی و قابل‌انجام بده. برای سؤال‌های منطقی یا پیچیده، کوتاه و مرحله‌به‌مرحله استدلال کن "
-                  "و بعد نتیجه را بگو." + RULES),
+    "cook": (0.4, "تو سرآشپز ایرانی هستی. مواد و مراحل را کوتاه و شماره‌دار بنویس." + RULES),
+    "research": (0.2, "تو پژوهشگر دقیقی. پاسخی روشن و منظم بده." + RULES),
+    "chat": (0.5, "تو دستیار هوشمند، صمیمی و باسواد هستی. آزادانه و طبیعی گفتگو کن، منطقی فکر کن و کوتاه و درست جواب بده." + RULES),
 }
 KW_JOKE = ("جوک", "شوخی", "بخندون", "لطیفه")
 KW_COOK = ("دستور پخت", "طرز تهیه", "آشپزی", "غذا", "پخت", "مواد لازم")
 KW_MATH = ("حل کن", "مشتق", "انتگرال", "معادله", "ریاضی", "محاسبه", "ساده کن", "حساب کن")
-KW_RESEARCH = ("تحقیق", "درباره", "کیست", "چیست", "چه کسی", "تاریخچه", "توضیح بده",
-               "کجاست", "چه زمانی", "چه سالی", "پایتخت", "جستجو")
+KW_RESEARCH = ("تحقیق", "مقاله", "جستجو کن")   # فقط وقتی کاربر صریحاً بخواهد
 
 JOKES = [
     "از دانش‌آموزی پرسیدند: چرا دیر آمدی؟ گفت: چون تابلوی «مدرسه، آهسته‌تر برانید» را دیدم!",
@@ -431,12 +421,12 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
 def detect_mode(msg):
     if any(k in msg for k in KW_JOKE):
         return "joke"
+    if any(k in msg for k in KW_RESEARCH):
+        return "research"
     if any(k in msg for k in KW_COOK):
         return "cook"
     if any(k in msg for k in KW_MATH) or safe_math(msg) is not None:
         return "math"
-    if any(k in msg for k in KW_RESEARCH):
-        return "research"
     return "chat"
 
 
@@ -457,8 +447,93 @@ def pick_joke():
     return JOKES[i]
 
 
+_TOPIC_STOP = {"تحقیق", "کن", "کنید", "بکن", "درباره", "درباره‌ی", "درمورد", "مقاله", "جستجو", "لطفا", "لطفاً",
+               "یک", "بنویس", "بده", "برام", "برایم", "بگو", "در", "مورد", "راجع", "به", "را", "رو", "خلاصه",
+               "کامل", "و", "من", "می‌خوام", "می‌خواهم", "میخوام", "ازش", "از", "اش", "ی"}
+
+
+def extract_topic(q):
+    words = re.sub(r"[؟?.,!:؛،]", " ", q).split()
+    keep = [w for w in words if w not in _TOPIC_STOP]
+    return " ".join(keep).strip() or q
+
+
+def _wiki_titles(query, lang):
+    r = SESSION.get("https://%s.wikipedia.org/w/api.php" % lang, params={
+        "action": "opensearch", "search": query, "limit": 5, "namespace": 0, "format": "json"}, timeout=8)
+    if r.status_code != 200 or not r.text.strip():
+        return []
+    data = r.json()
+    return data[1] if len(data) > 1 else []
+
+
+def _wiki_intro(title, lang, chars):
+    r = SESSION.get("https://%s.wikipedia.org/w/api.php" % lang, params={
+        "action": "query", "format": "json", "prop": "extracts", "exintro": 1, "explaintext": 1,
+        "exchars": chars, "titles": title, "redirects": 1}, timeout=8)
+    if r.status_code != 200:
+        return ""
+    pages = (r.json().get("query") or {}).get("pages") or {}
+    for pg in pages.values():
+        ex = (pg.get("extract") or "").strip()
+        if ex:
+            return ex
+    return ""
+
+
+def research_lookup(topic, q, cancel=None, stage=None):
+    """مقاله‌ی ویکی‌پدیا را پیدا می‌کند: فارسی، و اگر نبود انگلیسی. خروجی: dict یا None."""
+    try:
+        title = None
+        for t in _wiki_titles(topic, "fa"):
+            if _relevant(t, topic):
+                title = t
+                break
+        if title is None:
+            docs = _wiki_fulltext(clean_query(topic), "fa")
+            if docs:
+                title = docs[0][0]
+        if title:
+            text = _wiki_intro(title, "fa", RESEARCH_CHARS)
+            if text:
+                return {"title": title, "text": text, "lang": "fa"}
+        if cancel is None or not cancel.is_set():
+            if stage:
+                stage("search_en")
+            kw = english_keywords(q, cancel)
+            if kw:
+                titles = _wiki_titles(kw, "en")
+                if titles:
+                    text = _wiki_intro(titles[0], "en", 900)
+                    if text:
+                        return {"title": titles[0], "text": text, "lang": "en"}
+    except requests.exceptions.ConnectionError:
+        return {"error": NO_CONNECTION_MSG}
+    except Exception:
+        pass
+    return None
+
+
+def format_article(title, text, limit=900):
+    """متن ویکی‌پدیا را به یک مقاله‌ی کوتاه (خلاصه + توضیح بیشتر) تبدیل می‌کند. بدون مدل = سریع و دقیق."""
+    text = re.sub(r"[ \t]+", " ", re.sub(r"\s*\n\s*", " ", text)).strip()
+    sentences = [x.strip() for x in re.split(r"(?<=[.!؟?])\s+", text) if x.strip()]
+    summary, i = "", 0
+    while i < len(sentences) and (not summary or len(summary) + len(sentences[i]) <= 380):
+        summary += (" " if summary else "") + sentences[i]
+        i += 1
+    details = ""
+    while i < len(sentences) and len(summary) + len(details) + len(sentences[i]) <= limit:
+        details += (" " if details else "") + sentences[i]
+        i += 1
+    out = "«%s»\n\nخلاصه:\n%s" % (title, summary)
+    if details:
+        out += "\n\nتوضیح بیشتر:\n" + details
+    return out
+
+
 def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
-    """سریع‌ترین مسیر ممکن: فوری (بدون مدل) -> کش -> مدل."""
+    """دو حالت روشن: گفتگوی آزاد (فقط مدل) و تحقیق (مقاله‌ی ویکی‌پدیا)."""
     q = query.strip()
     ok = lambda text, title=None: {"text": text, "title": title, "error": False}
 
@@ -476,47 +551,61 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
         if math_res and math_res["pure"]:
             return ok("پاسخ دقیق: " + math_res["answer"])
 
-    key = (mode, q)
-    if mode in ("research", "cook") and key in CACHE:
-        CACHE.move_to_end(key)
-        return CACHE[key]
-
-    temperature, system = MODES[mode]
-    user, title, wiki = q, None, None
-    if mode == "math" and math_res:
-        user = q + "\n\nنتیجه‌ی محاسبه‌ی دقیق: " + math_res["answer"]
-    elif mode == "research" or (mode == "chat" and looks_informational(q)):
+    # ── حالت تحقیق ──
+    note = ""
+    if mode == "research":
+        topic = extract_topic(q)
+        key = ("research", topic)
+        if key in CACHE:
+            CACHE.move_to_end(key)
+            return CACHE[key]
         if stage:
             stage("search")
-        wiki = wiki_lookup(q, cancel, stage)
-        if not wiki["error"]:
-            title = wiki["title"]
-            ctx = wiki["text"]
-            if len(ctx) > WIKI_CONTEXT_CHARS:
-                ctx = ctx[:WIKI_CONTEXT_CHARS].rsplit(" ", 1)[0] + "…"
-            note = "(متن مرجع انگلیسی است؛ پاسخ را به فارسی روان بنویس.)\n" if wiki.get("lang") == "en" else ""
-            user = note + "متن مرجع (ویکی‌پدیا):\n" + ctx + "\n\nسؤال: " + q
-            system += REF_RULE
-        elif mode == "research":
-            user = q + "\n\n(توجه: در ویکی‌پدیا مرجع مرتبطی پیدا نشد؛ با احتیاط و صادقانه جواب بده.)"
+        info = research_lookup(topic, q, cancel, stage)
+        if info and info.get("error"):
+            return {"text": info["error"], "title": None, "error": True}
+        if info and info["lang"] == "fa":
+            res = ok(format_article(info["title"], info["text"]), info["title"])
+            CACHE[key] = res
+            while len(CACHE) > 40:
+                CACHE.popitem(last=False)
+            return res
+        if info and info["lang"] == "en":
+            if stage:
+                stage("think")
+            try:
+                ans = ask_ollama(
+                    "Summarize the text below accurately in simple Persian (Farsi), 4-5 sentences. "
+                    "Use only the text. Do not use Chinese characters.",
+                    info["text"], 0.2, MODE_TOKENS["research"], push, None, cancel)
+                if ans:
+                    res = ok("«%s»\n\nخلاصه:\n%s" % (info["title"], ans), info["title"] + " (EN)")
+                    CACHE[key] = res
+                    return res
+            except Exception:
+                pass
+            return ok("«%s»\n\n%s" % (info["title"], info["text"]), info["title"] + " (EN)")
+        # مقاله‌ای پیدا نشد: با احتیاط از دانش خود مدل
+        mode = "chat"
+        note = "\n\n(در ویکی‌پدیا منبعی پیدا نشد؛ فقط اگر مطمئنی کوتاه جواب بده و بگو منبع نداری.)"
+        q = topic
+
+    temperature, system = MODES[mode]
+    user = q
+    if mode == "math" and math_res:
+        user = q + "\n\nنتیجه‌ی دقیق: " + math_res["answer"]
+    user += note
 
     if stage:
         stage("think")
     try:
         answer = ask_ollama(system, user, temperature, MODE_TOKENS[mode], push, history, cancel)
         if answer:
-            res = ok(answer, title)
-            if mode in ("research", "cook") and not (cancel is not None and cancel.is_set()):
-                CACHE[key] = res
-                while len(CACHE) > 40:
-                    CACHE.popitem(last=False)
-            return res
+            return ok(answer)
         raise ValueError("empty")
     except requests.exceptions.Timeout:
         return {"text": TIMEOUT_MSG, "title": None, "error": True}
     except Exception:
-        if wiki and not wiki["error"]:
-            return wiki
         return {"text": NO_AI_MSG, "title": None, "error": True}
 
 
@@ -744,6 +833,9 @@ class SearchApp(App):
         self._latest = ""
         self._latest_rid = -1
         self._last_query = ""
+        self._stage_text = "فکر…"
+        self._t0 = 0.0
+        self._tick_ev = None
 
         root = BoxLayout(orientation="vertical")
 
@@ -921,6 +1013,7 @@ class SearchApp(App):
         self.busy = True
         self.send_btn.set_stop(True)
         self.set_status("busy")
+        self._start_ticker()
         self.input.text = ""
         if self.welcome is not None:
             self.chat.remove_widget(self.welcome)
@@ -942,6 +1035,22 @@ class SearchApp(App):
                          args=(query, rid, self.cancel_ev, list(self.history)), daemon=True).start()
         Clock.schedule_once(lambda dt: setattr(self.input, "focus", True), 0.1)
 
+    def _start_ticker(self):
+        self._stop_ticker()
+        self._t0 = time.time()
+        self._stage_text = "فکر…"
+        self._tick_ev = Clock.schedule_interval(self._tick_status, 1)
+
+    def _stop_ticker(self):
+        if self._tick_ev is not None:
+            self._tick_ev.cancel()
+            self._tick_ev = None
+
+    def _tick_status(self, dt):
+        if not self.busy:
+            return False
+        self.status.set(ACCENT_2, "%s %ds" % (self._stage_text, int(time.time() - self._t0)))
+
     def stop_generation(self):
         self.req_id += 1
         if self.cancel_ev is not None:
@@ -949,6 +1058,7 @@ class SearchApp(App):
         self._drop_typing()
         self.stream_bub = None
         self.busy = False
+        self._stop_ticker()
         self.send_btn.set_stop(False)
         if self.status_kind == "busy":
             self.set_status("ready")
@@ -969,10 +1079,8 @@ class SearchApp(App):
                 Clock.schedule_once(self._flush, 0.08)
 
         def stage(kind):
-            text = {"search": "در حال جستجو…", "search_en": "جستجوی منبع انگلیسی…",
-                    "think": "در حال فکر…"}[kind]
-            Clock.schedule_once(
-                lambda dt: self.status.set(ACCENT_2, text) if (rid == self.req_id and self.busy) else None, 0)
+            if rid == self.req_id:
+                self._stage_text = {"search": "جستجو…", "search_en": "جستجوی EN…", "think": "فکر…"}[kind]
 
         result = ask(query, push, history, ev, stage)
         Clock.schedule_once(lambda dt: self._finish(result, rid), 0.15)
@@ -1010,14 +1118,15 @@ class SearchApp(App):
                 self._row(self._bubble(res["text"], "error"), "left")
         else:
             self._set_bot_text(res["text"])
-            self.history += [{"role": "user", "content": self._last_query[:400]},
-                             {"role": "assistant", "content": res["text"][:400]}]
+            self.history += [{"role": "user", "content": self._last_query[:200]},
+                             {"role": "assistant", "content": res["text"][:300]}]
             self.history = self.history[-HISTORY_MESSAGES:]
             if res.get("title"):
                 short = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
                 self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, short), "source"), "left")
         self.stream_bub = None
         self.busy = False
+        self._stop_ticker()
         self.send_btn.set_stop(False)
         if self.status_kind == "busy":
             self.set_status("ready")
