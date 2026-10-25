@@ -59,7 +59,14 @@ FONT = "Vazir"
 # توکن و Account ID را داخل کد نگذارید؛ از «تنظیمات اتصال» داخل برنامه وارد کنید.
 CF_ACCOUNT_ID = ""
 CF_API_TOKEN = ""
-CF_MODELS = ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/meta/llama-3.2-3b-instruct"]
+# به ترتیب اولویت امتحان می‌شوند؛ اگر مدلی روی حساب شما نباشد یا خطا بدهد، خودکار می‌رود سراغ بعدی.
+# آخری باید همیشه مدل کوچک و مطمئن باشد (برای گرم‌کردن و پشتیبان).
+CF_MODELS = [
+    "@cf/openai/gpt-oss-120b",
+    "@cf/qwen/qwen3.8-27b",
+    "@cf/qwen/qwen3-30b-a3b-fp8",
+    "@cf/meta/llama-3.2-3b-instruct",
+]
 CLOUD_URL = ""                       # آدرس Worker کلودفلر (اختیاری). خالی = غیرفعال
 CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (APP_KEY در Worker؛ اختیاری)
 SERVER_URL = ""                      # آدرس سرور عمومی شما. خالی = بدون سرور
@@ -388,19 +395,22 @@ def strip_think(t):
 
 
 DEBUG = {"line": ""}                 # خط تشخیصی که زیر جواب نشان داده می‌شود
-SHOW_DEBUG = True                    # بعد از رفع مشکل False کنید
+SHOW_DEBUG = True                    # برای دیدن خط تشخیصی زیر جواب: True
 
 
 def _cf_call(model, msgs, max_tokens, temperature):
-    """یک درخواست به Cloudflare Workers AI. خروجی: (متن، قطع_شده؟، اطلاعات)."""
+    """یک درخواست به Cloudflare Workers AI (آدرس سازگار با OpenAI = فرمت یکسان برای همه‌ی مدل‌ها)."""
+    if "gpt-oss" in model:
+        max_tokens = max_tokens * 2          # این مدل‌ها بخشی از توکن را صرف فکر کردن می‌کنند
     r = requests.post(
-        "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s" % (BACKEND["cf_account"], model),
-        json={"messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
-        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=90)
+        "https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % BACKEND["cf_account"],
+        json={"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
+        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=120)
     r.raise_for_status()
-    res = r.json().get("result") or {}
+    data = r.json()
+    res = data.get("result") or data
     ch = (res.get("choices") or [{}])[0]
-    raw = res.get("response") or (ch.get("message") or {}).get("content") or ""
+    raw = (ch.get("message") or {}).get("content") or res.get("response") or ""
     text = strip_think(str(raw))
     finish = ch.get("finish_reason") or res.get("finish_reason")
     usage = res.get("usage") or {}
@@ -409,7 +419,7 @@ def _cf_call(model, msgs, max_tokens, temperature):
     if not cut and ctoks is not None and ctoks >= max_tokens - 2:
         cut = True
     if not cut and finish is None and ctoks is None and text and text.rstrip()[-1] not in ".!؟?»)…:*":
-        cut = True                   # مدل اطلاعات پایان نمی‌دهد: از شکل پایان متن حدس بزن
+        cut = True
     info = {"model": model.split("/")[-1], "finish": finish, "tokens": ctoks, "max": max_tokens,
             "raw_len": len(str(raw)), "len": len(text)}
     return text, cut, info
