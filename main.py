@@ -11,6 +11,7 @@
 import ast
 import json
 import math
+import os
 import random
 import re
 import threading
@@ -32,6 +33,7 @@ from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.label import Label
+from kivy.uix.popup import Popup
 from kivy.uix.scrollview import ScrollView
 from kivy.uix.textinput import TextInput
 from kivy.uix.widget import Widget
@@ -46,6 +48,14 @@ LabelBase.register(name="Vazir", fn_regular="Vazirmatn-Regular.ttf")
 FONT = "Vazir"
 
 # --- مدل (Ollama روی همین گوشی) ---
+CF_ACCOUNT_ID = ""                   # اختیاری: اتصال مستقیم به Cloudflare Workers AI (بهتر است از داخل برنامه وارد شود)
+CF_API_TOKEN = ""
+CF_MODELS = ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/meta/llama-3.2-3b-instruct"]
+CLOUD_URL = ""                       # آدرس Worker کلودفلر (مثلاً https://xxx.workers.dev). خالی = غیرفعال
+CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (همان APP_KEY در Worker؛ اختیاری)
+SERVER_URL = ""                      # آدرس سرور عمومی شما (بعداً پر کنید). خالی = بدون سرور
+SERVER_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
+SERVER_KEY = ""                      # اگر سرور کلید دارد
 OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_MODEL = "qwen3:4b-instruct-2507-q4_K_M"   # سریع‌تر: qwen3:1.7b | قوی‌تر (کندتر): qwen3:8b
 OLLAMA_TIMEOUT = 300
@@ -65,8 +75,8 @@ WIKI_SUMMARY_URL = "https://fa.wikipedia.org/api/rest_v1/page/summary/"
 NO_RESULT_MSG = "پاسخی پیدا نشد."
 NO_CONNECTION_MSG = "اتصال به اینترنت برقرار نشد."
 TIMEOUT_MSG = "درخواست بیش از حد طول کشید. دوباره تلاش کنید."
-NO_AI_MSG = ("مدل هوش مصنوعی در دسترس نیست. Termux را باز کنید، دستور "
-             "ollama serve > /dev/null 2>&1 & را بزنید و دوباره امتحان کنید.")
+NO_AI_MSG = ("گفتگوی آزاد فعلاً در دسترس نیست، ولی تحقیق، ریاضی، جوک و سلام کار می‌کنند. "
+             "مثلاً بنویسید: «درباره‌ی حافظ تحقیق کن» یا «حل کن: 2x + 6 = 14».")
 
 # --- رنگ‌ها ---
 BG = hexc("#0B0D17")
@@ -93,6 +103,57 @@ SUGGESTIONS = [
 
 Window.clearcolor = BG
 Window.softinput_mode = "below_target"
+
+# ═════════════════════════ انتخاب سرور: گوشی یا کامپیوتر ═════════════════════════
+BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": ""}
+
+
+def _settings_path():
+    try:
+        return os.path.join(App.get_running_app().user_data_dir, "settings.json")
+    except Exception:
+        return None
+
+
+def load_settings():
+    path = _settings_path()
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    path = _settings_path()
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
+def apply_settings():
+    """اگر آدرس کامپیوتر ذخیره شده باشد از آن استفاده می‌کند، وگرنه از خود گوشی."""
+    st = load_settings()
+    pc = (st.get("pc_url") or "").strip()
+    if pc:
+        if not pc.startswith("http"):
+            pc = "http://" + pc
+        if ":" not in pc.split("//", 1)[1]:
+            pc += ":11434"
+        BACKEND.update(url=pc.rstrip("/"), model=(st.get("pc_model") or "qwen3:8b").strip(), pc=True, cloud=False)
+    elif (st.get("cf_account") or CF_ACCOUNT_ID).strip() and (st.get("cf_token") or CF_API_TOKEN).strip():
+        BACKEND.update(url="https://api.cloudflare.com", model="cf", pc=False, cloud="direct",
+                       cf_account=(st.get("cf_account") or CF_ACCOUNT_ID).strip(),
+                       cf_token=(st.get("cf_token") or CF_API_TOKEN).strip())
+    elif CLOUD_URL:
+        BACKEND.update(url=CLOUD_URL.rstrip("/"), model="cloud", pc=False, cloud=True)
+    elif SERVER_URL:
+        BACKEND.update(url=SERVER_URL.rstrip("/"), model=SERVER_MODEL, pc=False, cloud=False)
+    else:
+        BACKEND.update(url=OLLAMA_URL, model=OLLAMA_MODEL, pc=False, cloud=False)
+
 
 # ═════════════════════════ متن فارسی ═════════════════════════
 def shape(text):
@@ -389,18 +450,53 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     messages = [{"role": "system", "content": system}]
     messages += list(history or [])
     messages.append({"role": "user", "content": user})
+    if BACKEND.get("cloud") == "direct":
+        last = None
+        for model in CF_MODELS:
+            try:
+                msgs = [dict(m) for m in messages]
+                if "qwen3" in model:
+                    for m in reversed(msgs):
+                        if m["role"] == "user":
+                            m["content"] += " /no_think"
+                            break
+                r = requests.post(
+                    "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s" % (BACKEND["cf_account"], model),
+                    json={"messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
+                    headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=60)
+                r.raise_for_status()
+                res = r.json().get("result") or {}
+                text = res.get("response") or ((res.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+                text = strip_think(str(text))
+                if text:
+                    if push:
+                        push(text)
+                    return text
+            except Exception as e:
+                last = e
+        raise last or ValueError("empty")
+    if BACKEND.get("cloud"):
+        r = requests.post(BACKEND["url"] + "/chat",
+                          json={"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
+                          headers={"X-App-Key": CLOUD_KEY}, timeout=60)
+        r.raise_for_status()
+        text = strip_think(r.json().get("answer", ""))
+        if push and text:
+            push(text)
+        return text
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": BACKEND["model"],
         "messages": messages,
         "stream": True,
         "keep_alive": KEEP_ALIVE,
         "options": {"temperature": temperature, "top_p": 0.8, "repeat_penalty": 1.1,
                     "num_predict": max_tokens, "num_ctx": CONTEXT_SIZE},
     }
-    if "qwen3" in OLLAMA_MODEL and "instruct" not in OLLAMA_MODEL:
+    if "qwen3" in BACKEND["model"] and "instruct" not in BACKEND["model"]:
         payload["think"] = False
     acc = ""
-    with requests.post(OLLAMA_URL + "/api/chat", json=payload, stream=True,
+    hdr = {"Authorization": "Bearer " + SERVER_KEY} if (SERVER_KEY and BACKEND["url"] == SERVER_URL.rstrip("/")) else None
+    with requests.post(BACKEND["url"] + "/api/chat", json=payload, stream=True, headers=hdr,
                        timeout=(10, OLLAMA_TIMEOUT)) as r:
         r.raise_for_status()
         for line in r.iter_lines():
@@ -606,6 +702,13 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
     except requests.exceptions.Timeout:
         return {"text": TIMEOUT_MSG, "title": None, "error": True}
     except Exception:
+        if mode == "chat" and len(q) >= 6:           # بدون مدل: دست‌کم از ویکی‌پدیا جواب بده
+            try:
+                info = research_lookup(extract_topic(q), q, None, None)
+                if info and not info.get("error") and info["lang"] == "fa":
+                    return ok(format_article(info["title"], info["text"]), info["title"])
+            except Exception:
+                pass
         return {"text": NO_AI_MSG, "title": None, "error": True}
 
 
@@ -812,7 +915,7 @@ class SearchApp(App):
         return True            # با رفتن به Termux برنامه بسته نشود
 
     def on_resume(self):
-        if self.status_kind not in ("ready", "busy"):
+        if self.status_kind not in ("ready", "busy", "lite"):
             self.warm_up()
 
     def on_start(self):
@@ -820,6 +923,7 @@ class SearchApp(App):
 
     # ---------- ساخت رابط ----------
     def build(self):
+        apply_settings()
         self.busy = False
         self.welcome = None
         self.typing = None
@@ -896,9 +1000,10 @@ class SearchApp(App):
         self.status_kind = kind
         table = {
             "loading": (ORANGE, "آماده‌سازی…"),
-            "ready": (GREEN, "آماده"),
+            "ready": (GREEN, "آماده · PC" if BACKEND["pc"] else ("آماده · ابر" if BACKEND["cloud"] else "آماده")),
             "busy": (ACCENT_2, "در حال پاسخ…"),
             "off": (RED, "سرور خاموش"),
+            "lite": (ACCENT_2, "حالت سبک"),
             "nomodel": (RED, "مدل نصب نیست"),
         }
         color, text = table[kind]
@@ -912,16 +1017,29 @@ class SearchApp(App):
         def st(kind):
             Clock.schedule_once(lambda dt: self.set_status(kind), 0)
 
-        for _ in range(30):
+        local = BACKEND["url"].startswith("http://127.0.0.1")
+        if BACKEND.get("cloud"):
+            for _ in range(3):
+                try:
+                    test = BACKEND["url"] + ("/client/v4/ips" if BACKEND["cloud"] == "direct" else "/health")
+                    if requests.get(test, timeout=6).status_code == 200:
+                        st("ready")
+                        return
+                except Exception:
+                    pass
+                time.sleep(2)
+            st("lite")
+            return
+        for _ in range(4 if local else 30):
             try:
-                r = requests.get(OLLAMA_URL + "/api/tags", timeout=3)
+                r = requests.get(BACKEND["url"] + "/api/tags", timeout=3)
                 if r.status_code == 200:
                     names = [m.get("name", "") for m in r.json().get("models", [])]
-                    if OLLAMA_MODEL not in names and OLLAMA_MODEL + ":latest" not in names:
-                        st("nomodel")
+                    if BACKEND["model"] not in names and BACKEND["model"] + ":latest" not in names:
+                        st("lite" if local else "nomodel")
                         return
-                    requests.post(OLLAMA_URL + "/api/generate",
-                                  json={"model": OLLAMA_MODEL, "prompt": "", "stream": False,
+                    requests.post(BACKEND["url"] + "/api/generate",
+                                  json={"model": BACKEND["model"], "prompt": "", "stream": False,
                                         "keep_alive": KEEP_ALIVE,
                                         "options": {"num_ctx": CONTEXT_SIZE}},
                                   timeout=OLLAMA_TIMEOUT)
@@ -929,8 +1047,8 @@ class SearchApp(App):
                     return
             except Exception:
                 pass
-            time.sleep(4)
-        st("off")
+            time.sleep(3 if local else 4)
+        st("lite" if local else "off")
 
     # ---------- صفحه‌ی خوش‌آمد ----------
     def _show_welcome(self):
@@ -957,8 +1075,69 @@ class SearchApp(App):
             chip.add_widget(SLabel(s, font_size=sp(14.5), shorten=True))
             chip.bind(on_release=lambda _w, q=s: self.on_submit(q))
             w.add_widget(chip)
+        pc_chip = TapCard(bg=BG, border=BORDER, radius=16, size_hint_y=None, height=dp(44), padding=[dp(16), 0])
+        pc_chip.add_widget(SLabel("تنظیمات اتصال (ابر / کامپیوتر)", font_size=sp(13), color=MUTED, shorten=True))
+        pc_chip.bind(on_release=lambda *_: self.open_settings())
+        w.add_widget(Widget(size_hint_y=None, height=dp(6)))
+        w.add_widget(pc_chip)
         self.welcome = w
         self.chat.add_widget(w)
+
+    def open_settings(self):
+        st = load_settings()
+
+        def field(text, hint):
+            return TextInput(
+                text=text, hint_text=hint, hint_text_color=MUTED, multiline=False,
+                foreground_color=TEXT, cursor_color=ACCENT_2, background_normal="", background_active="",
+                background_color=SURFACE, font_name=FONT, font_size=sp(14),
+                size_hint_y=None, height=dp(42), padding=[dp(12), dp(10)])
+
+        def lab(t):
+            return SLabel(t, font_size=sp(12), color=MUTED, size_hint_y=None, height=dp(22))
+
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(5))
+        box.add_widget(lab("Cloudflare: شناسه‌ی حساب (Account ID)"))
+        cf_acc = field(st.get("cf_account", ""), "Account ID")
+        box.add_widget(cf_acc)
+        box.add_widget(lab("Cloudflare: توکن (API Token)"))
+        cf_tok = field(st.get("cf_token", ""), "API Token")
+        box.add_widget(cf_tok)
+        box.add_widget(lab("یا آدرس Ollama روی کامپیوتر (اختیاری)"))
+        url_in = field(st.get("pc_url", ""), "192.168.1.23:11434")
+        box.add_widget(url_in)
+        box.add_widget(lab("نام مدل روی کامپیوتر"))
+        model_in = field(st.get("pc_model", "qwen3:8b"), "qwen3:8b")
+        box.add_widget(model_in)
+
+        row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(10))
+        pop = Popup(title=shape("تنظیمات اتصال"), title_font=FONT, title_color=TEXT,
+                    separator_height=0, content=box, size_hint=(0.94, None), height=dp(520),
+                    background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
+
+        def save(*_):
+            save_settings({"cf_account": cf_acc.text.strip(), "cf_token": cf_tok.text.strip(),
+                           "pc_url": url_in.text.strip(), "pc_model": model_in.text.strip() or "qwen3:8b"})
+            apply_settings()
+            pop.dismiss()
+            self.warm_up()
+
+        def clear(*_):
+            save_settings({})
+            apply_settings()
+            pop.dismiss()
+            self.warm_up()
+
+        b_save = TapCard(bg=ACCENT, border=ACCENT, radius=14)
+        b_save.add_widget(SLabel("ذخیره", halign="center", color=WHITE))
+        b_save.bind(on_release=save)
+        b_clear = TapCard(bg=SURFACE, border=BORDER, radius=14)
+        b_clear.add_widget(SLabel("پاک کردن همه", halign="center"))
+        b_clear.bind(on_release=clear)
+        row.add_widget(b_save)
+        row.add_widget(b_clear)
+        box.add_widget(row)
+        pop.open()
 
     # ---------- حباب‌ها ----------
     def _style(self, kind):
