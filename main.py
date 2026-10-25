@@ -59,14 +59,21 @@ FONT = "Vazir"
 # توکن و Account ID را داخل کد نگذارید؛ از «تنظیمات اتصال» داخل برنامه وارد کنید.
 CF_ACCOUNT_ID = ""
 CF_API_TOKEN = ""
-# به ترتیب اولویت امتحان می‌شوند؛ اگر مدلی روی حساب شما نباشد یا خطا بدهد، خودکار می‌رود سراغ بعدی.
-# آخری باید همیشه مدل کوچک و مطمئن باشد (برای گرم‌کردن و پشتیبان).
-CF_MODELS = [
-    "@cf/openai/gpt-oss-120b",
-    "@cf/qwen/qwen3.8-27b",
-    "@cf/qwen/qwen3-30b-a3b-fp8",
-    "@cf/meta/llama-3.2-3b-instruct",
+# مدل‌هایی که کاربر از داخل برنامه انتخاب می‌کند: (نام نمایشی، شناسه‌ی Cloudflare، اندازه)
+CF_CHOICES = [
+    ("gpt-oss-120b", "@cf/openai/gpt-oss-120b", "117B"),
+    ("qwen3.8-27b", "@cf/qwen/qwen3.8-27b", "27B"),
+    ("qwen3-30b-a3b", "@cf/qwen/qwen3-30b-a3b-fp8", "30B"),
+    ("llama-3.2-3b", "@cf/meta/llama-3.2-3b-instruct", "3B"),
 ]
+CF_DEFAULT = CF_CHOICES[0][1]
+CF_WARM_MODEL = "@cf/meta/llama-3.2-3b-instruct"   # فقط برای تست اتصال هنگام باز شدن برنامه
+
+
+def cf_label(model_id):
+    return next((l for l, m, _ in CF_CHOICES if m == model_id), model_id)
+
+
 CLOUD_URL = ""                       # آدرس Worker کلودفلر (اختیاری). خالی = غیرفعال
 CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (APP_KEY در Worker؛ اختیاری)
 SERVER_URL = ""                      # آدرس سرور عمومی شما. خالی = بدون سرور
@@ -92,6 +99,9 @@ WIKI_SUMMARY_URL = "https://fa.wikipedia.org/api/rest_v1/page/summary/"
 NO_RESULT_MSG = "پاسخی پیدا نشد."
 NO_CONNECTION_MSG = "اتصال به اینترنت برقرار نشد."
 TIMEOUT_MSG = "درخواست بیش از حد طول کشید. دوباره تلاش کنید."
+QUOTA_MSG = ("سهمیه‌ی مدل «{m}» تمام شده یا موقتاً محدود شده است. تا شارژ شدن صبر کنید "
+             "(سهمیه‌ی روزانه حدود ساعت ۰۳:۳۰ بامداد به وقت ایران تمدید می‌شود) یا مدل دیگری را از بالای صفحه امتحان کنید.")
+MODEL_FAIL_MSG = "مدل «{m}» پاسخی نداد.\nدلیل: {e}\nمدل دیگری را از بالای صفحه انتخاب کنید."
 NO_AI_MSG = ("گفتگوی آزاد فعلاً در دسترس نیست، ولی تحقیق، ریاضی، جوک و سلام کار می‌کنند. "
              "مثلاً بنویسید: «درباره‌ی حافظ تحقیق کن» یا «حل کن: 2x + 6 = 14».")
 
@@ -122,7 +132,7 @@ Window.clearcolor = BG
 Window.softinput_mode = "below_target"
 
 # ═════════════════════════ انتخاب سرور: گوشی / کامپیوتر / ابر ═════════════════════════
-BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": ""}
+BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": "", "cf_model": CF_DEFAULT}
 
 
 def _settings_path():
@@ -150,6 +160,13 @@ def save_settings(data):
         pass
 
 
+def set_cf_model(model_id):
+    st = load_settings()
+    st["cf_model"] = model_id
+    save_settings(st)
+    BACKEND["cf_model"] = model_id
+
+
 def apply_settings():
     """اگر آدرس کامپیوتر ذخیره شده باشد از آن استفاده می‌کند، وگرنه Cloudflare، وگرنه خود گوشی."""
     st = load_settings()
@@ -163,7 +180,8 @@ def apply_settings():
     elif (st.get("cf_account") or CF_ACCOUNT_ID).strip() and (st.get("cf_token") or CF_API_TOKEN).strip():
         BACKEND.update(url="https://api.cloudflare.com", model="cf", pc=False, cloud="direct",
                        cf_account=(st.get("cf_account") or CF_ACCOUNT_ID).strip(),
-                       cf_token=(st.get("cf_token") or CF_API_TOKEN).strip())
+                       cf_token=(st.get("cf_token") or CF_API_TOKEN).strip(),
+                       cf_model=(st.get("cf_model") if st.get("cf_model") in [m for _, m, _ in CF_CHOICES] else CF_DEFAULT))
     elif CLOUD_URL:
         BACKEND.update(url=CLOUD_URL.rstrip("/"), model="cloud", pc=False, cloud=True)
     elif SERVER_URL:
@@ -394,6 +412,15 @@ def strip_think(t):
     return _CJK.sub("", t).strip()
 
 
+QUOTA = {"hit": False}               # آیا آخرین خطا «تمام شدن سهمیه» بوده؟
+
+
+class CFError(Exception):
+    def __init__(self, status, body):
+        super().__init__("%s %s" % (status, body[:120]))
+        self.status, self.body = status, body
+
+
 DEBUG = {"line": ""}                 # خط تشخیصی که زیر جواب نشان داده می‌شود
 SHOW_DEBUG = True                    # برای دیدن خط تشخیصی زیر جواب: True
 
@@ -401,12 +428,13 @@ SHOW_DEBUG = True                    # برای دیدن خط تشخیصی زی�
 def _cf_call(model, msgs, max_tokens, temperature):
     """یک درخواست به Cloudflare Workers AI (آدرس سازگار با OpenAI = فرمت یکسان برای همه‌ی مدل‌ها)."""
     if "gpt-oss" in model:
-        max_tokens = max_tokens * 2          # این مدل‌ها بخشی از توکن را صرف فکر کردن می‌کنند
+        max_tokens = max(max_tokens * 2, 300)   # این مدل‌ها بخشی از توکن را صرف فکر کردن می‌کنند
     r = requests.post(
         "https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % BACKEND["cf_account"],
         json={"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
         headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=120)
-    r.raise_for_status()
+    if r.status_code >= 400:
+        raise CFError(r.status_code, r.text or "")
     data = r.json()
     res = data.get("result") or data
     ch = (res.get("choices") or [{}])[0]
@@ -431,46 +459,51 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     messages.append({"role": "user", "content": user})
     if BACKEND.get("cloud") == "direct":
         DEBUG["line"] = ""
-        last = None
-        for model in CF_MODELS:
-            try:
-                msgs = [dict(m) for m in messages]
-                is_qwen = "qwen3" in model
+        QUOTA["hit"] = False
+        model = BACKEND.get("cf_model") or CF_DEFAULT       # فقط همان مدلی که کاربر انتخاب کرده
+        QUOTA["model"] = cf_label(model)
+        is_qwen = "qwen3" in model
+        msgs = [dict(m) for m in messages]
+        if is_qwen:
+            for m in reversed(msgs):
+                if m["role"] == "user":
+                    m["content"] += " /no_think"
+                    break
+        try:
+            text, cut, info = _cf_call(model, msgs, max_tokens, temperature)
+            if not text:                                  # مدل‌های «فکرکن» گاهی همه‌ی توکن را صرف فکر می‌کنند
+                text, cut, info = _cf_call(model, msgs, max_tokens * 2, temperature)
+            n = 0
+            # اگر جواب به‌خاطر سقف توکن قطع شد، ادامه‌اش را بگیر
+            while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
+                n += 1
+                if push:
+                    push(text)
+                nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
                 if is_qwen:
-                    for m in reversed(msgs):
-                        if m["role"] == "user":
-                            m["content"] += " /no_think"
-                            break
-                text, cut, info = _cf_call(model, msgs, max_tokens, temperature)
-                n = 0
-                # اگر جواب به‌خاطر سقف توکن قطع شد، ادامه‌اش را بگیر
-                n = 0
-                while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
-                    n += 1
-                    if push:
-                        push(text)
-                    nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
-                    if is_qwen:
-                        nxt += " /no_think"
-                    more, cut, _i = _cf_call(
-                        model,
-                        msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
-                        max_tokens, temperature)
-                    if not more:
-                        break
-                    text += (" " if not text.endswith("\n") else "") + more
-                if text:
-                    DEBUG["line"] = "model=%s finish=%s tokens=%s/%s chars=%s continues=%d" % (
-                        info["model"], info["finish"], info["tokens"], info["max"], len(text), n)
-                    if push:
-                        push(text)
-                    return text
-                DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
-                    info["model"], info["finish"], info["tokens"], info["raw_len"])
-            except Exception as e:
-                last = e
-                DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:80])
-        raise last or ValueError("empty")
+                    nxt += " /no_think"
+                more, cut, _i = _cf_call(
+                    model,
+                    msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
+                    max_tokens, temperature)
+                if not more:
+                    break
+                text += (" " if not text.endswith("\n") else "") + more
+            if text:
+                DEBUG["line"] = "model=%s finish=%s tokens=%s/%s chars=%s continues=%d" % (
+                    info["model"], info["finish"], info["tokens"], info["max"], len(text), n)
+                if push:
+                    push(text)
+                return text
+        except Exception as e:
+            body = getattr(e, "body", "") or ""
+            DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:100])
+            if getattr(e, "status", None) == 429 or "neuron" in body.lower() or "4006" in body:
+                QUOTA["hit"] = True
+            raise
+        DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
+            info["model"], info["finish"], info["tokens"], info["raw_len"])
+        raise ValueError("empty answer")
     if BACKEND.get("cloud"):
         r = requests.post(BACKEND["url"] + "/chat",
                           json={"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
@@ -697,6 +730,12 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
     except requests.exceptions.Timeout:
         return {"text": TIMEOUT_MSG, "title": None, "error": True}
     except Exception:
+        if BACKEND.get("cloud") == "direct":
+            name = cf_label(BACKEND.get("cf_model") or CF_DEFAULT)
+            if QUOTA["hit"]:
+                return {"text": QUOTA_MSG.replace("{m}", name), "title": None, "error": True}
+            return {"text": MODEL_FAIL_MSG.replace("{m}", name).replace("{e}", DEBUG["line"][:140] or "نامشخص"),
+                    "title": None, "error": True}
         if mode == "chat" and len(q) >= 6:           # بدون مدل: دست‌کم از ویکی‌پدیا جواب بده
             try:
                 info = research_lookup(extract_topic(q), q, None, None)
@@ -989,6 +1028,14 @@ class SearchApp(App):
         divider.bind(pos=lambda w, v: setattr(rect, "pos", v), size=lambda w, v: setattr(rect, "size", v))
         root.add_widget(divider)
 
+        self.model_wrap = BoxLayout(size_hint_y=None, height=dp(42), padding=[dp(14), dp(4)])
+        self.model_bar = TapCard(bg=SURFACE, border=BORDER, radius=12, padding=[dp(12), 0])
+        self.model_lbl = SLabel("", font_size=sp(12.5), color=MUTED, shorten=True)
+        self.model_bar.add_widget(self.model_lbl)
+        self.model_bar.bind(on_release=lambda *_: self.open_model_picker())
+        self.model_wrap.add_widget(self.model_bar)
+        root.add_widget(self.model_wrap)
+
         self.scroll = ScrollView(do_scroll_x=False, bar_width=dp(3),
                                  bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
         self.chat = BoxLayout(orientation="vertical", size_hint_y=None,
@@ -1017,6 +1064,7 @@ class SearchApp(App):
         root.add_widget(bar)
 
         self._show_welcome()
+        self._refresh_model_bar()
         return root
 
     # ---------- وضعیت و گرم‌کردن مدل ----------
@@ -1049,7 +1097,7 @@ class SearchApp(App):
                 try:
                     r = requests.post(
                         "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s"
-                        % (BACKEND["cf_account"], CF_MODELS[-1]),
+                        % (BACKEND["cf_account"], CF_WARM_MODEL),
                         json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
                         headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=15)
                     if r.status_code == 200:
@@ -1093,6 +1141,41 @@ class SearchApp(App):
                 pass
             time.sleep(3 if local else 4)
         st("lite" if local else "off")
+
+    # ---------- انتخاب مدل هوش مصنوعی ----------
+    def _refresh_model_bar(self):
+        direct = BACKEND.get("cloud") == "direct"
+        self.model_wrap.height = dp(42) if direct else 0
+        self.model_wrap.opacity = 1 if direct else 0
+        self.model_wrap.disabled = not direct
+        self.model_lbl.text = shape("انتخاب مدل هوش مصنوعی:  " + cf_label(BACKEND.get("cf_model") or CF_DEFAULT))
+
+    def open_model_picker(self):
+        cur = BACKEND.get("cf_model") or CF_DEFAULT
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        pop = Popup(title=shape("انتخاب مدل هوش مصنوعی"), title_font=FONT, title_color=TEXT,
+                    separator_height=0, content=box, size_hint=(0.94, None), height=dp(400),
+                    background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
+
+        def pick(_w, mid):
+            set_cf_model(mid)
+            self._refresh_model_bar()
+            pop.dismiss()
+
+        for label, mid, size in CF_CHOICES:
+            sel = (mid == cur)
+            card = TapCard(bg=ACCENT if sel else SURFACE, border=ACCENT_2 if sel else BORDER, radius=14,
+                           size_hint_y=None, height=dp(54), padding=[dp(14), 0], spacing=dp(8))
+            card.add_widget(SLabel(size, font_size=sp(11.5), color=WHITE if sel else MUTED,
+                                   size_hint_x=None, width=dp(60), halign="left"))
+            card.add_widget(SLabel(label, font_size=sp(14.5), color=WHITE if sel else TEXT))
+            card.bind(on_release=lambda w, m=mid: pick(w, m))
+            box.add_widget(card)
+        box.add_widget(SLabel("سهمیه‌ی روزانه‌ی Cloudflare طبق مستندات بین مدل‌ها مشترک است", font_size=sp(11),
+                              color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
+        box.add_widget(SLabel("و حدود ساعت ۰۳:۳۰ بامداد (به وقت ایران) تمدید می‌شود", font_size=sp(11),
+                              color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
+        pop.open()
 
     # ---------- صفحه‌ی خوش‌آمد ----------
     def _show_welcome(self):
@@ -1161,14 +1244,17 @@ class SearchApp(App):
 
         def save(*_):
             save_settings({"cf_account": cf_acc.text.strip(), "cf_token": cf_tok.text.strip(),
-                           "pc_url": url_in.text.strip(), "pc_model": model_in.text.strip() or "qwen3:8b"})
+                           "pc_url": url_in.text.strip(), "pc_model": model_in.text.strip() or "qwen3:8b",
+                           "cf_model": st.get("cf_model", CF_DEFAULT)})
             apply_settings()
+            self._refresh_model_bar()
             pop.dismiss()
             self.warm_up()
 
         def clear(*_):
             save_settings({})
             apply_settings()
+            self._refresh_model_bar()
             pop.dismiss()
             self.warm_up()
 
