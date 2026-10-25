@@ -387,8 +387,12 @@ def strip_think(t):
     return _CJK.sub("", t).strip()
 
 
+DEBUG = {"line": ""}                 # خط تشخیصی که زیر جواب نشان داده می‌شود
+SHOW_DEBUG = True                    # بعد از رفع مشکل False کنید
+
+
 def _cf_call(model, msgs, max_tokens, temperature):
-    """یک درخواست به Cloudflare Workers AI. خروجی: (متن، آیا_بخاطر_سقف_توکن_قطع_شد)."""
+    """یک درخواست به Cloudflare Workers AI. خروجی: (متن، قطع_شده؟، اطلاعات)."""
     r = requests.post(
         "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s" % (BACKEND["cf_account"], model),
         json={"messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
@@ -396,9 +400,19 @@ def _cf_call(model, msgs, max_tokens, temperature):
     r.raise_for_status()
     res = r.json().get("result") or {}
     ch = (res.get("choices") or [{}])[0]
-    text = res.get("response") or (ch.get("message") or {}).get("content") or ""
-    cut = ch.get("finish_reason") == "length"
-    return strip_think(str(text)), cut
+    raw = res.get("response") or (ch.get("message") or {}).get("content") or ""
+    text = strip_think(str(raw))
+    finish = ch.get("finish_reason") or res.get("finish_reason")
+    usage = res.get("usage") or {}
+    ctoks = usage.get("completion_tokens")
+    cut = finish in ("length", "max_tokens")
+    if not cut and ctoks is not None and ctoks >= max_tokens - 2:
+        cut = True
+    if not cut and finish is None and ctoks is None and text and text.rstrip()[-1] not in ".!؟?»)…:*":
+        cut = True                   # مدل اطلاعات پایان نمی‌دهد: از شکل پایان متن حدس بزن
+    info = {"model": model.split("/")[-1], "finish": finish, "tokens": ctoks, "max": max_tokens,
+            "raw_len": len(str(raw)), "len": len(text)}
+    return text, cut, info
 
 
 def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, cancel=None):
@@ -406,6 +420,7 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     messages += list(history or [])
     messages.append({"role": "user", "content": user})
     if BACKEND.get("cloud") == "direct":
+        DEBUG["line"] = ""
         last = None
         for model in CF_MODELS:
             try:
@@ -416,7 +431,8 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
                         if m["role"] == "user":
                             m["content"] += " /no_think"
                             break
-                text, cut = _cf_call(model, msgs, max_tokens, temperature)
+                text, cut, info = _cf_call(model, msgs, max_tokens, temperature)
+                n = 0
                 # اگر جواب به‌خاطر سقف توکن قطع شد، ادامه‌اش را بگیر
                 n = 0
                 while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
@@ -426,7 +442,7 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
                     nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
                     if is_qwen:
                         nxt += " /no_think"
-                    more, cut = _cf_call(
+                    more, cut, _i = _cf_call(
                         model,
                         msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
                         max_tokens, temperature)
@@ -434,11 +450,16 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
                         break
                     text += (" " if not text.endswith("\n") else "") + more
                 if text:
+                    DEBUG["line"] = "model=%s finish=%s tokens=%s/%s chars=%s continues=%d" % (
+                        info["model"], info["finish"], info["tokens"], info["max"], len(text), n)
                     if push:
                         push(text)
                     return text
+                DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
+                    info["model"], info["finish"], info["tokens"], info["raw_len"])
             except Exception as e:
                 last = e
+                DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:80])
         raise last or ValueError("empty")
     if BACKEND.get("cloud"):
         r = requests.post(BACKEND["url"] + "/chat",
@@ -813,7 +834,7 @@ class ChatText(BoxLayout):
     متن بلند در چند Label کوچک (هرکدام حداکثر CHUNK_LINES خط) چیده می‌شود تا
     از محدودیت اندازه‌ی تکسچر Kivy عبور نکند و انتهای جواب بریده نشود.
     """
-    CHUNK_LINES = 30
+    CHUNK_LINES = 12
 
     def __init__(self, color=TEXT, font_px=None, **kwargs):
         self._font_px = font_px or sp(15.5)
@@ -866,10 +887,11 @@ class ChatText(BoxLayout):
             sizes.append(c.texture_size)
         w = max(s[0] for s in sizes)
         total_h = sum(s[1] for s in sizes)
+        pad = dp(8)                           # فضای اضافه تا آخرین خط هیچ‌وقت بریده نشود
         for c, (_cw, ch) in zip(self._chunks, sizes):
-            c.size = (w + dp(2), ch)
-            c.text_size = c.size
-        self.size = (w + dp(2), total_h)
+            c.size = (w + dp(2), ch + pad)
+            c.text_size = (w + dp(2), None)   # ارتفاع آزاد = بدون برش پایین متن
+        self.size = (w + dp(2), total_h + pad * len(self._chunks))
 
 
 class TypingBubble(Card):
@@ -1312,6 +1334,15 @@ class SearchApp(App):
             self.history += [{"role": "user", "content": self._last_query[:200]},
                              {"role": "assistant", "content": res["text"][:600]}]
             self.history = self.history[-HISTORY_MESSAGES:]
+            if SHOW_DEBUG:
+                try:
+                    lb = self.stream_bub.label
+                    ui = " | ui: text=%d shown=%d chunks=%d h=%dpx" % (
+                        len(res["text"]), sum(len(c.text) for c in lb._chunks), len(lb._chunks), lb.height)
+                except Exception:
+                    ui = ""
+                self._row(self._bubble((DEBUG["line"] or "no-api") + ui, "source"), "left")
+                DEBUG["line"] = ""
             if res.get("title"):
                 short = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
                 self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, short), "source"), "left")
