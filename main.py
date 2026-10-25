@@ -2,11 +2,19 @@
 """
 دستیار هوشمند فارسی - نسخه‌ی پیشرفته (Kivy)
 ------------------------------------------------
-- مدل هوش مصنوعی روی خود گوشی (Ollama در Termux)
+- مدل هوش مصنوعی روی خود گوشی (Ollama در Termux) یا Cloudflare Workers AI
 - پاسخ‌های فوری بدون مدل: حساب/معادله (دقیق)، سلام، جوک
 - گرم‌کردن مدل هنگام باز شدن برنامه (جواب اول سریع‌تر)
 - جواب زنده (stream)، دکمه‌ی توقف، گفتگوی جدید، حافظه‌ی گفتگو
 - تحقیق با منبع از ویکی‌پدیای فارسی، کش پاسخ‌ها
+
+اصلاحات این نسخه (جواب نصفه):
+  1) سقف توکن‌ها (MODE_TOKENS) چند برابر شد.
+  2) اگر Cloudflare جواب را به‌خاطر سقف توکن قطع کند (finish_reason=length)،
+     برنامه خودکار «ادامه بده» می‌فرستد و جواب را کامل می‌کند.
+  3) متن‌های بلند در چند تکه‌ی کوچک نمایش داده می‌شوند (محدودیت اندازه‌ی تکسچر Kivy).
+  4) پرامپت‌ها دیگر مدل را به جواب خیلی کوتاه مجبور نمی‌کنند.
+  5) حافظه‌ی گفتگو جواب‌های بلندتری نگه می‌دارد (600 به‌جای 300 نویسه).
 """
 import ast
 import json
@@ -47,25 +55,27 @@ SOURCE_NAME = "ویکی‌پدیا"
 LabelBase.register(name="Vazir", fn_regular="Vazirmatn-Regular.ttf")
 FONT = "Vazir"
 
-# --- مدل (Ollama روی همین گوشی) ---
-CF_ACCOUNT_ID = ""                   # اختیاری: اتصال مستقیم به Cloudflare Workers AI (بهتر است از داخل برنامه وارد شود)
+# --- مدل ---
+# توکن و Account ID را داخل کد نگذارید؛ از «تنظیمات اتصال» داخل برنامه وارد کنید.
+CF_ACCOUNT_ID = ""
 CF_API_TOKEN = ""
 CF_MODELS = ["@cf/qwen/qwen3-30b-a3b-fp8", "@cf/meta/llama-3.2-3b-instruct"]
-CLOUD_URL = ""                       # آدرس Worker کلودفلر (مثلاً https://xxx.workers.dev). خالی = غیرفعال
-CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (همان APP_KEY در Worker؛ اختیاری)
-SERVER_URL = ""                      # آدرس سرور عمومی شما (بعداً پر کنید). خالی = بدون سرور
+CLOUD_URL = ""                       # آدرس Worker کلودفلر (اختیاری). خالی = غیرفعال
+CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (APP_KEY در Worker؛ اختیاری)
+SERVER_URL = ""                      # آدرس سرور عمومی شما. خالی = بدون سرور
 SERVER_MODEL = "qwen3:4b-instruct-2507-q4_K_M"
 SERVER_KEY = ""                      # اگر سرور کلید دارد
 OLLAMA_URL = "http://127.0.0.1:11434"
 OLLAMA_MODEL = "qwen3:4b-instruct-2507-q4_K_M"   # سریع‌تر: qwen3:1.7b | قوی‌تر (کندتر): qwen3:8b
 OLLAMA_TIMEOUT = 300
-CONTEXT_SIZE = 3072                  # کوچک‌تر = سریع‌تر
+CONTEXT_SIZE = 4096                  # کوچک‌تر = سریع‌تر (برای جواب‌های بلندتر کمی بیشتر شد)
 KEEP_ALIVE = "30m"                   # مدل تا ۳۰ دقیقه در حافظه می‌ماند
-WIKI_CONTEXT_CHARS = 450
 RETRIEVE_DOCS = 1                    # تعداد مقاله‌ی مرجع برای هر سؤال
 DOC_CHARS = 380                      # طول خلاصه‌ی هر مقاله
 HISTORY_MESSAGES = 4                 # تعداد پیام‌های قبلیِ یادآوری‌شده
-MODE_TOKENS = {"math": 220, "joke": 120, "cook": 300, "research": 230, "chat": 260}
+# فارسی ~۲ تا ۳ توکن برای هر کلمه مصرف می‌کند؛ سقف‌ها بر همین اساس بالا رفتند.
+MODE_TOKENS = {"math": 800, "joke": 300, "cook": 1000, "research": 700, "chat": 1000}
+MAX_CONTINUE = 2                     # حداکثر دفعات «ادامه بده» وقتی جواب قطع شود
 RESEARCH_CHARS = 1300                # طول متن مقاله‌ی ویکی‌پدیا برای تحقیق
 
 HEADERS = {"User-Agent": "SearchAppPersian/1.0 (student project)"}
@@ -104,7 +114,7 @@ SUGGESTIONS = [
 Window.clearcolor = BG
 Window.softinput_mode = "below_target"
 
-# ═════════════════════════ انتخاب سرور: گوشی یا کامپیوتر ═════════════════════════
+# ═════════════════════════ انتخاب سرور: گوشی / کامپیوتر / ابر ═════════════════════════
 BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": ""}
 
 
@@ -134,7 +144,7 @@ def save_settings(data):
 
 
 def apply_settings():
-    """اگر آدرس کامپیوتر ذخیره شده باشد از آن استفاده می‌کند، وگرنه از خود گوشی."""
+    """اگر آدرس کامپیوتر ذخیره شده باشد از آن استفاده می‌کند، وگرنه Cloudflare، وگرنه خود گوشی."""
     st = load_settings()
     pc = (st.get("pc_url") or "").strip()
     if pc:
@@ -164,14 +174,16 @@ def shape(text):
 
 
 # ═════════════════════════ دستورِ مدل (پرامپت‌ها) ═════════════════════════
-RULES = " فقط فارسی ساده و درست بنویس (بدون حروف چینی). اول جواب مستقیم، بعد توضیح کوتاه. چیزی اختراع نکن؛ اگر نمی‌دانی بگو."
+RULES = (" فقط فارسی ساده و درست بنویس (بدون حروف چینی). اول جواب مستقیم، بعد توضیح کافی و کامل. "
+         "جواب را همیشه تا انتها و با جمله‌ی کامل تمام کن. چیزی اختراع نکن؛ اگر نمی‌دانی بگو.")
 REF_RULE = " از «متن مرجع» برای پاسخ استفاده کن؛ اگر نامرتبط بود نادیده بگیر."
 MODES = {
-    "math": (0.1, "تو معلم ریاضی دقیقی. کوتاه و مرحله‌به‌مرحله حل کن. اگر «نتیجه‌ی دقیق» داده شد همان جواب نهایی است." + RULES),
+    "math": (0.1, "تو معلم ریاضی دقیقی. مرحله‌به‌مرحله و روشن حل کن. اگر «نتیجه‌ی دقیق» داده شد همان جواب نهایی است." + RULES),
     "joke": (0.9, "تو طنزپرداز بامزه‌ای. یک جوک کوتاه و تمیز بگو." + RULES),
-    "cook": (0.4, "تو سرآشپز ایرانی هستی. مواد و مراحل را کوتاه و شماره‌دار بنویس." + RULES),
+    "cook": (0.4, "تو سرآشپز ایرانی هستی. مواد و مراحل را شماره‌دار و کامل بنویس." + RULES),
     "research": (0.2, "تو پژوهشگر دقیقی. پاسخی روشن و منظم بده." + RULES),
-    "chat": (0.5, "تو دستیار هوشمند، صمیمی و باسواد هستی. آزادانه و طبیعی گفتگو کن، منطقی فکر کن و کوتاه و درست جواب بده." + RULES),
+    "chat": (0.5, "تو دستیار هوشمند، صمیمی و باسواد هستی. آزادانه و طبیعی گفتگو کن، منطقی فکر کن و کامل و درست جواب بده؛ "
+                  "اگر سؤال ساده بود کوتاه، اگر نیاز به توضیح داشت مفصل‌تر پاسخ بده." + RULES),
 }
 KW_JOKE = ("جوک", "شوخی", "بخندون", "لطیفه")
 KW_COOK = ("دستور پخت", "طرز تهیه", "آشپزی", "غذا", "پخت", "مواد لازم")
@@ -323,16 +335,6 @@ CACHE = OrderedDict()
 _STOP_Q = {"چیست", "کیست", "کجاست", "چه", "چی", "کی", "کجا", "آیا", "درباره", "تحقیق", "کن", "توضیح",
            "بده", "بگو", "لطفا", "لطفاً", "را", "رو", "من", "برام", "برای", "جستجو", "چه‌کسی", "کسی",
            "زمانی", "سالی", "چطور", "چگونه", "چرا", "چند", "کدام", "هست", "است", "؟", "?"}
-_INFO_WORDS = ("چه", "چی", "کی", "کجا", "چرا", "چگونه", "چطور", "چند", "کدام", "آیا", "چیست", "کیست",
-               "معنی", "تعریف", "تاریخ", "تفاوت", "علت", "دلیل", "اولین", "بزرگ‌ترین", "پایتخت")
-_SKIP_INFO = ("حالت", "نظرت", "پیشنهاد", "برنامه", "داستان", "شعر", "بنویس", "کمکم", "چطوری", "خوبی",
-              "چه کار", "چکار", "چیکار", "کار کنم", "بکنم", "کنم؟")
-
-
-def looks_informational(q):
-    if len(q.split()) < 2 or any(k in q for k in _SKIP_INFO):
-        return False
-    return ("؟" in q or "?" in q) or any(k in q for k in _INFO_WORDS)
 
 
 def clean_query(q):
@@ -344,41 +346,6 @@ def clean_query(q):
 def _relevant(title, q):
     qn = q.replace("ي", "ی").replace("ك", "ک")
     return any(len(w) >= 4 and w in qn for w in re.split(r"[\s\u200c()\-]+", title))
-
-
-def _wiki_title_lookup(query):
-    """جستجوی عنوان در ویکی‌پدیای فارسی (روش پشتیبان)."""
-    def fail(msg):
-        return {"text": msg, "title": None, "error": True}
-    try:
-        r = SESSION.get(WIKI_SEARCH_URL, params={
-            "action": "opensearch", "search": clean_query(query), "limit": 3,
-            "namespace": 0, "format": "json"}, timeout=8)
-        if r.status_code != 200 or not r.text.strip():
-            return fail(NO_RESULT_MSG)
-        data = r.json()
-        titles = data[1] if len(data) > 1 else []
-        picked = [t for t in titles if _relevant(t, query)][:2]
-        if not picked:
-            return fail(NO_RESULT_MSG)
-        texts = []
-        for t in picked:
-            r2 = SESSION.get(WIKI_SUMMARY_URL + quote(t.replace(" ", "_"), safe=""), timeout=8)
-            if r2.status_code == 200 and r2.text.strip():
-                ex = (r2.json().get("extract") or "").strip()
-                if ex:
-                    texts.append(ex)
-                    if len(ex) >= 300:
-                        break
-        if not texts:
-            return fail(NO_RESULT_MSG)
-        return {"text": "\n".join(texts), "title": picked[0], "error": False}
-    except requests.exceptions.ConnectionError:
-        return fail(NO_CONNECTION_MSG)
-    except requests.exceptions.Timeout:
-        return fail(TIMEOUT_MSG)
-    except Exception:
-        return fail(NO_RESULT_MSG)
 
 
 def _wiki_fulltext(query, lang="fa"):
@@ -403,36 +370,10 @@ def english_keywords(q, cancel=None):
     """کلیدواژه‌ی انگلیسی برای جستجو در ویکی‌پدیای انگلیسی (دانش بسیار بیشتر)."""
     try:
         out = ask_ollama("Convert the user's question into 2-5 English Wikipedia search keywords. "
-                         "Output only the keywords, nothing else.", q, 0.0, 20, None, None, cancel)
+                         "Output only the keywords, nothing else.", q, 0.0, 40, None, None, cancel)
         return re.sub(r"[^A-Za-z0-9 \-]", " ", out).strip()
     except Exception:
         return ""
-
-
-def wiki_lookup(query, cancel=None, stage=None):
-    """ویکی‌پدیای فارسی -> (اگر نبود) ویکی‌پدیای انگلیسی -> (پشتیبان) جستجوی عنوان."""
-    def pack(docs, lang):
-        text = "\n\n".join("[%s] %s" % (t, x) for t, x in docs)
-        title = docs[0][0] + (" (EN)" if lang == "en" else "")
-        return {"text": text, "title": title, "error": False, "lang": lang}
-
-    try:
-        docs = _wiki_fulltext(clean_query(query), "fa")
-        if docs:
-            return pack(docs, "fa")
-        if cancel is None or not cancel.is_set():
-            if stage:
-                stage("search_en")
-            kw = english_keywords(query, cancel)
-            if kw:
-                docs = _wiki_fulltext(kw, "en")
-                if docs:
-                    return pack(docs, "en")
-    except requests.exceptions.ConnectionError:
-        return {"text": NO_CONNECTION_MSG, "title": None, "error": True}
-    except Exception:
-        pass
-    return _wiki_title_lookup(query)
 
 
 # ═════════════════════════ مغز: مسیریابی و مدل ═════════════════════════
@@ -446,6 +387,20 @@ def strip_think(t):
     return _CJK.sub("", t).strip()
 
 
+def _cf_call(model, msgs, max_tokens, temperature):
+    """یک درخواست به Cloudflare Workers AI. خروجی: (متن، آیا_بخاطر_سقف_توکن_قطع_شد)."""
+    r = requests.post(
+        "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s" % (BACKEND["cf_account"], model),
+        json={"messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
+        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=90)
+    r.raise_for_status()
+    res = r.json().get("result") or {}
+    ch = (res.get("choices") or [{}])[0]
+    text = res.get("response") or (ch.get("message") or {}).get("content") or ""
+    cut = ch.get("finish_reason") == "length"
+    return strip_think(str(text)), cut
+
+
 def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, cancel=None):
     messages = [{"role": "system", "content": system}]
     messages += list(history or [])
@@ -455,19 +410,29 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
         for model in CF_MODELS:
             try:
                 msgs = [dict(m) for m in messages]
-                if "qwen3" in model:
+                is_qwen = "qwen3" in model
+                if is_qwen:
                     for m in reversed(msgs):
                         if m["role"] == "user":
                             m["content"] += " /no_think"
                             break
-                r = requests.post(
-                    "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s" % (BACKEND["cf_account"], model),
-                    json={"messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
-                    headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=60)
-                r.raise_for_status()
-                res = r.json().get("result") or {}
-                text = res.get("response") or ((res.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-                text = strip_think(str(text))
+                text, cut = _cf_call(model, msgs, max_tokens, temperature)
+                # اگر جواب به‌خاطر سقف توکن قطع شد، ادامه‌اش را بگیر
+                n = 0
+                while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
+                    n += 1
+                    if push:
+                        push(text)
+                    nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
+                    if is_qwen:
+                        nxt += " /no_think"
+                    more, cut = _cf_call(
+                        model,
+                        msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
+                        max_tokens, temperature)
+                    if not more:
+                        break
+                    text += (" " if not text.endswith("\n") else "") + more
                 if text:
                     if push:
                         push(text)
@@ -478,7 +443,7 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     if BACKEND.get("cloud"):
         r = requests.post(BACKEND["url"] + "/chat",
                           json={"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
-                          headers={"X-App-Key": CLOUD_KEY}, timeout=60)
+                          headers={"X-App-Key": CLOUD_KEY}, timeout=90)
         r.raise_for_status()
         text = strip_think(r.json().get("answer", ""))
         if push and text:
@@ -671,8 +636,8 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
                 stage("think")
             try:
                 ans = ask_ollama(
-                    "Summarize the text below accurately in simple Persian (Farsi), 4-5 sentences. "
-                    "Use only the text. Do not use Chinese characters.",
+                    "Summarize the text below accurately in simple Persian (Farsi), 4-5 complete sentences. "
+                    "Use only the text. Do not use Chinese characters. Always finish your last sentence.",
                     info["text"], 0.2, MODE_TOKENS["research"], push, None, cancel)
                 if ans:
                     res = ok("«%s»\n\nخلاصه:\n%s" % (info["title"], ans), info["title"] + " (EN)")
@@ -681,10 +646,9 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
             except Exception:
                 pass
             return ok("«%s»\n\n%s" % (info["title"], info["text"]), info["title"] + " (EN)")
-        # مقاله‌ای پیدا نشد: با احتیاط از دانش خود مدل
+        # مقاله‌ای پیدا نشد: با احتیاط از دانش خود مدل (سؤال اصلی کاربر حفظ می‌شود)
         mode = "chat"
-        note = "\n\n(در ویکی‌پدیا منبعی پیدا نشد؛ فقط اگر مطمئنی کوتاه جواب بده و بگو منبع نداری.)"
-        q = topic
+        note = "\n\n(در ویکی‌پدیا منبعی پیدا نشد؛ فقط اگر مطمئنی جواب بده و بگو منبع نداری.)"
 
     temperature, system = MODES[mode]
     user = q
@@ -843,20 +807,25 @@ class SendButton(TapCard):
             self._head.points = [cx - s * 0.85, cy + s * 0.1, cx, cy + s * 1.05, cx + s * 0.85, cy + s * 0.1]
 
 
-class ChatLabel(Label):
-    """متن چندخطی فارسی با شکستن خط دستی (هر خط جدا shape می‌شود)."""
+class ChatText(BoxLayout):
+    """
+    متن چندخطی فارسی با شکستن خط دستی (هر خط جدا shape می‌شود).
+    متن بلند در چند Label کوچک (هرکدام حداکثر CHUNK_LINES خط) چیده می‌شود تا
+    از محدودیت اندازه‌ی تکسچر Kivy عبور نکند و انتهای جواب بریده نشود.
+    """
+    CHUNK_LINES = 30
 
     def __init__(self, color=TEXT, font_px=None, **kwargs):
         self._font_px = font_px or sp(15.5)
-        super().__init__(font_name=FONT, font_size=self._font_px, color=color,
-                         halign="right", valign="top", size_hint=(None, None),
-                         line_height=1.45, **kwargs)
+        self._color = color
+        super().__init__(orientation="vertical", size_hint=(None, None), spacing=0, **kwargs)
         self._core = CoreLabel(font_name=FONT, font_size=self._font_px)
+        self._chunks = []
 
     def _w(self, s):
         return self._core.get_extents(s)[0]
 
-    def set_text(self, raw, max_w):
+    def _wrap(self, raw, max_w):
         lines = []
         for para in raw.split("\n"):
             words = para.split()
@@ -872,12 +841,35 @@ class ChatLabel(Label):
                     lines.append(cur)
                     cur = w
             lines.append(cur)
-        self.text_size = (None, None)
-        self.text = "\n".join(shape(l) for l in lines)
-        self.texture_update()
-        w, h = self.texture_size
-        self.size = (w + dp(2), h)
-        self.text_size = self.size
+        return lines
+
+    def _new_chunk(self):
+        return Label(font_name=FONT, font_size=self._font_px, color=self._color,
+                     halign="right", valign="top", size_hint=(None, None), line_height=1.45)
+
+    def set_text(self, raw, max_w):
+        lines = self._wrap(raw, max_w)
+        n = self.CHUNK_LINES
+        groups = [lines[i:i + n] for i in range(0, len(lines), n)] or [[""]]
+        if len(groups) != len(self._chunks):
+            while len(self._chunks) < len(groups):
+                self._chunks.append(self._new_chunk())
+            del self._chunks[len(groups):]
+            self.clear_widgets()
+            for c in reversed(self._chunks):      # BoxLayout عمودی: اولین فرزند پایین‌ترین است
+                self.add_widget(c)
+        sizes = []
+        for c, g in zip(self._chunks, groups):
+            c.text_size = (None, None)
+            c.text = "\n".join(shape(l) for l in g)
+            c.texture_update()
+            sizes.append(c.texture_size)
+        w = max(s[0] for s in sizes)
+        total_h = sum(s[1] for s in sizes)
+        for c, (_cw, ch) in zip(self._chunks, sizes):
+            c.size = (w + dp(2), ch)
+            c.text_size = c.size
+        self.size = (w + dp(2), total_h)
 
 
 class TypingBubble(Card):
@@ -1005,6 +997,7 @@ class SearchApp(App):
             "off": (RED, "سرور خاموش"),
             "lite": (ACCENT_2, "حالت سبک"),
             "nomodel": (RED, "مدل نصب نیست"),
+            "badkey": (RED, "توکن نامعتبر"),
         }
         color, text = table[kind]
         self.status.set(color, text)
@@ -1018,11 +1011,30 @@ class SearchApp(App):
             Clock.schedule_once(lambda dt: self.set_status(kind), 0)
 
         local = BACKEND["url"].startswith("http://127.0.0.1")
+        if BACKEND.get("cloud") == "direct":
+            # یک درخواست واقعی و کوچک: هم اتصال و هم صحت Account ID و توکن را می‌سنجد
+            for _ in range(3):
+                try:
+                    r = requests.post(
+                        "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s"
+                        % (BACKEND["cf_account"], CF_MODELS[-1]),
+                        json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=15)
+                    if r.status_code == 200:
+                        st("ready")
+                        return
+                    if r.status_code in (400, 401, 403):
+                        st("badkey")
+                        return
+                except Exception:
+                    pass
+                time.sleep(2)
+            st("lite")
+            return
         if BACKEND.get("cloud"):
             for _ in range(3):
                 try:
-                    test = BACKEND["url"] + ("/client/v4/ips" if BACKEND["cloud"] == "direct" else "/health")
-                    if requests.get(test, timeout=6).status_code == 200:
+                    if requests.get(BACKEND["url"] + "/health", timeout=6).status_code == 200:
                         st("ready")
                         return
                 except Exception:
@@ -1152,7 +1164,7 @@ class SearchApp(App):
         st = self._style(kind)
         padx, pady = dp(st["pad"][0]), dp(st["pad"][1])
         max_inner = Window.width * 0.84 - 2 * padx
-        lbl = ChatLabel(color=st["color"], font_px=st["px"])
+        lbl = ChatText(color=st["color"], font_px=st["px"])
         lbl.set_text(raw, max_inner)
         bub = Card(bg=st["bg"], border=st["border"], radius=18 if kind != "source" else 12,
                    size_hint=(None, None), padding=[padx, pady],
@@ -1298,7 +1310,7 @@ class SearchApp(App):
         else:
             self._set_bot_text(res["text"])
             self.history += [{"role": "user", "content": self._last_query[:200]},
-                             {"role": "assistant", "content": res["text"][:300]}]
+                             {"role": "assistant", "content": res["text"][:600]}]
             self.history = self.history[-HISTORY_MESSAGES:]
             if res.get("title"):
                 short = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
