@@ -32,11 +32,14 @@ import requests
 import arabic_reshaper
 from bidi.algorithm import get_display
 
+from kivy.animation import Animation
 from kivy.app import App
+from kivy.core.clipboard import Clipboard
 from kivy.clock import Clock
 from kivy.core.text import LabelBase, Label as CoreLabel
 from kivy.core.window import Window
 from kivy.graphics import Color, Ellipse, Line, Rectangle, RoundedRectangle
+from kivy.graphics.texture import Texture
 from kivy.metrics import dp, sp
 from kivy.uix.behaviors import ButtonBehavior
 from kivy.uix.boxlayout import BoxLayout
@@ -61,10 +64,11 @@ CF_ACCOUNT_ID = ""
 CF_API_TOKEN = ""
 # مدل‌هایی که کاربر از داخل برنامه انتخاب می‌کند: (نام نمایشی، شناسه‌ی Cloudflare، اندازه)
 CF_CHOICES = [
+    # روی پلن رایگان کار می‌کنند (طبق گزارش‌های کاربران؛ ممکن است برای حساب شما فرق کند)
     ("gpt-oss-120b", "@cf/openai/gpt-oss-120b", "117B"),
-    ("glm-5.3", "@cf/zai-org/glm-5.3", "753B"),
-    ("deepseek-v4-pro-0813", "@cf/deepseek-ai/deepseek-v4-pro-0813", "1.6T"),
     ("qwen3.8-27b", "@cf/qwen/qwen3.8-27b", "27B"),
+    ("nemotron-3-120b-a12b", "@cf/nvidia/nemotron-3-120b-a12b", "120B"),
+    ("gpt-oss-20b", "@cf/openai/gpt-oss-20b", "20B"),
     ("qwen3-30b-a3b", "@cf/qwen/qwen3-30b-a3b-fp8", "30B"),
     ("llama-3.2-3b", "@cf/meta/llama-3.2-3b-instruct", "3B"),
 ]
@@ -72,7 +76,7 @@ CF_DEFAULT = CF_CHOICES[0][1]
 # مدل‌های «فکرکن» قبل از جواب چند صد توکن فکر می‌کنند. اگر سقف توکن کم باشد، فکرشان جواب را می‌بلعد
 # و جواب خالی یا ناقص می‌شود. این ضریب‌ها فقط «اجازه» می‌دهند فکر و جواب کامل شوند؛
 # مصرف واقعی همان مقداری است که مدل لازم دارد. هوش مدل و پرامپت‌ها دست‌نخورده می‌مانند.
-REASONING_BOOST = {"gpt-oss": (2, 300), "glm-5": (3, 1500), "deepseek-v4": (3, 1500)}
+REASONING_BOOST = {"gpt-oss": (2, 300), "qwen3.8": (3, 1500), "nemotron": (3, 1500)}
 CF_WARM_MODEL = "@cf/meta/llama-3.2-3b-instruct"   # فقط برای تست اتصال هنگام باز شدن برنامه
 
 
@@ -107,6 +111,8 @@ NO_CONNECTION_MSG = "اتصال به اینترنت برقرار نشد."
 TIMEOUT_MSG = "درخواست بیش از حد طول کشید. دوباره تلاش کنید."
 QUOTA_MSG = ("سهمیه‌ی مدل «{m}» تمام شده یا موقتاً محدود شده است. تا شارژ شدن صبر کنید "
              "(سهمیه‌ی روزانه حدود ساعت ۰۳:۳۰ بامداد به وقت ایران تمدید می‌شود) یا مدل دیگری را از بالای صفحه امتحان کنید.")
+PLAN_MSG = ("مدل «{m}» در پلن رایگان Cloudflare (Workers Free) در دسترس نیست و به پلن Workers Paid نیاز دارد. "
+            "یا پلن را ارتقا بدهید، یا یکی از مدل‌های بدون علامت را از بالای صفحه انتخاب کنید.")
 MODEL_FAIL_MSG = "مدل «{m}» پاسخی نداد.\nدلیل: {e}\nمدل دیگری را از بالای صفحه انتخاب کنید."
 NO_AI_MSG = ("گفتگوی آزاد فعلاً در دسترس نیست، ولی تحقیق، ریاضی، جوک و سلام کار می‌کنند. "
              "مثلاً بنویسید: «درباره‌ی حافظ تحقیق کن» یا «حل کن: 2x + 6 = 14».")
@@ -126,6 +132,9 @@ RED = hexc("#F87171")
 ERR_BG = hexc("#2A1620")
 ERR_BORDER = hexc("#5B2A3A")
 ERR_TEXT = hexc("#FFB4C0")
+BG_TOP = hexc("#171C3F")           # بالای پس‌زمینه‌ی گرادیان
+ACCENT_DARK = hexc("#5B3FE0")
+BLUE = hexc("#4F8BFF")
 
 SUGGESTIONS = [
     "حل کن: 2x + 6 = 14",
@@ -141,11 +150,39 @@ Window.softinput_mode = "below_target"
 BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": "", "cf_model": CF_DEFAULT}
 
 
-def _settings_path():
+UI = {"scale": 1.0}                  # اندازه‌ی متن گفتگو
+FONT_SCALES = [("کوچک", 0.88), ("متوسط", 1.0), ("بزرگ", 1.15), ("خیلی بزرگ", 1.3)]
+PERSONA = {"key": "default"}
+# (کلید، نام، توضیح، متنِ اضافه به پرامپت). حالت «پیش‌فرض» هیچ متنی اضافه نمی‌کند، پس رفتار مدل دقیقاً مثل قبل است.
+PERSONAS = [
+    ("default", "پیش‌فرض", "بدون هیچ تغییر در رفتار مدل", ""),
+    ("translator", "مترجم", "ترجمه‌ی روان و دقیق",
+     " نقش تو مترجم حرفه‌ای است: متن کاربر را به زبان درخواستی (اگر مشخص نشد: فارسی و انگلیسی به‌جای هم) روان و دقیق ترجمه کن و فقط ترجمه را بنویس."),
+    ("coder", "برنامه‌نویس", "کد تمیز و توضیح کوتاه",
+     " نقش تو برنامه‌نویس ارشد است: کد را تمیز و کامل بنویس، کوتاه توضیح بده و نام متغیرها و کد را انگلیسی نگه دار."),
+    ("teacher", "معلم", "توضیح ساده و مرحله‌به‌مرحله",
+     " نقش تو معلم صبور است: مفهوم را ساده و مرحله‌به‌مرحله با مثال توضیح بده و در پایان یک سؤال کوتاه برای تمرین بپرس."),
+    ("writer", "نویسنده", "متن ادبی و جذاب",
+     " نقش تو نویسنده‌ی خلاق است: متن را روان، ادبی و جذاب بنویس."),
+]
+
+
+def persona_addendum():
+    for key, _n, _h, extra in PERSONAS:
+        if key == PERSONA["key"]:
+            return extra
+    return ""
+
+
+def _data_path(fname):
     try:
-        return os.path.join(App.get_running_app().user_data_dir, "settings.json")
+        return os.path.join(App.get_running_app().user_data_dir, fname)
     except Exception:
         return None
+
+
+def _settings_path():
+    return _data_path("settings.json")
 
 
 def load_settings():
@@ -176,6 +213,11 @@ def set_cf_model(model_id):
 def apply_settings():
     """اگر آدرس کامپیوتر ذخیره شده باشد از آن استفاده می‌کند، وگرنه Cloudflare، وگرنه خود گوشی."""
     st = load_settings()
+    PERSONA["key"] = st.get("persona") if st.get("persona") in [p[0] for p in PERSONAS] else "default"
+    try:
+        UI["scale"] = float(st.get("font_scale", 1.0))
+    except Exception:
+        UI["scale"] = 1.0
     pc = (st.get("pc_url") or "").strip()
     if pc:
         if not pc.startswith("http"):
@@ -418,7 +460,7 @@ def strip_think(t):
     return _CJK.sub("", t).strip()
 
 
-QUOTA = {"hit": False}               # آیا آخرین خطا «تمام شدن سهمیه» بوده؟
+QUOTA = {"hit": False, "plan": False}               # آیا آخرین خطا «تمام شدن سهمیه» بوده؟
 
 
 class CFError(Exception):
@@ -428,7 +470,7 @@ class CFError(Exception):
 
 
 DEBUG = {"line": ""}                 # خط تشخیصی که زیر جواب نشان داده می‌شود
-SHOW_DEBUG = True                    # برای دیدن خط تشخیصی زیر جواب: True
+SHOW_DEBUG = False                   # برای دیدن خط تشخیصی زیر جواب: True
 
 
 def _cf_call(model, msgs, max_tokens, temperature):
@@ -468,9 +510,10 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     if BACKEND.get("cloud") == "direct":
         DEBUG["line"] = ""
         QUOTA["hit"] = False
+        QUOTA["plan"] = False
         model = BACKEND.get("cf_model") or CF_DEFAULT       # فقط همان مدلی که کاربر انتخاب کرده
         QUOTA["model"] = cf_label(model)
-        is_qwen = "qwen3" in model
+        is_qwen = "qwen3-" in model      # فقط Qwen3 قدیمی دستور /no_think را می‌فهمد؛ qwen3.8 با فکرِ پیش‌فرض خودش کار می‌کند
         msgs = [dict(m) for m in messages]
         if is_qwen:
             for m in reversed(msgs):
@@ -508,6 +551,8 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
             DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:100])
             if getattr(e, "status", None) == 429 or "neuron" in body.lower() or "4006" in body:
                 QUOTA["hit"] = True
+            if getattr(e, "status", None) == 403 and "not available" in body.lower() and "free" in body.lower():
+                QUOTA["plan"] = True
             raise
         DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
             info["model"], info["finish"], info["tokens"], info["raw_len"])
@@ -723,6 +768,8 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
         note = "\n\n(در ویکی‌پدیا منبعی پیدا نشد؛ فقط اگر مطمئنی جواب بده و بگو منبع نداری.)"
 
     temperature, system = MODES[mode]
+    if mode == "chat":
+        system += persona_addendum()      # «پیش‌فرض» = رشته‌ی خالی = بدون تغییر
     user = q
     if mode == "math" and math_res:
         user = q + "\n\nنتیجه‌ی دقیق: " + math_res["answer"]
@@ -742,6 +789,8 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
             name = cf_label(BACKEND.get("cf_model") or CF_DEFAULT)
             if QUOTA["hit"]:
                 return {"text": QUOTA_MSG.replace("{m}", name), "title": None, "error": True}
+            if QUOTA["plan"]:
+                return {"text": PLAN_MSG.replace("{m}", name), "title": None, "error": True}
             return {"text": MODEL_FAIL_MSG.replace("{m}", name).replace("{e}", DEBUG["line"][:140] or "نامشخص"),
                     "title": None, "error": True}
         if mode == "chat" and len(q) >= 6:           # بدون مدل: دست‌کم از ویکی‌پدیا جواب بده
@@ -761,18 +810,78 @@ def ask(query, push=None, history=None, cancel=None, stage=None):
         return {"text": "خطای غیرمنتظره: " + str(e), "title": None, "error": True}
 
 
+# ═════════════════════════ ابزارهای طراحی ═════════════════════════
+def _px(c):
+    c = tuple(c) + (1.0,) * (4 - len(c))
+    return bytes(int(max(0.0, min(1.0, float(v))) * 255) for v in c[:4])
+
+
+def gradient_texture(bottom, top):
+    """بافت گرادیان عمودی (۱×۲ پیکسل که با فیلتر خطی کشیده می‌شود). اگر نشد None برمی‌گرداند."""
+    try:
+        tex = Texture.create(size=(1, 2), colorfmt="rgba")
+        tex.blit_buffer(_px(bottom) + _px(top), colorfmt="rgba", bufferfmt="ubyte")
+        tex.mag_filter = "linear"
+        tex.min_filter = "linear"
+        return tex
+    except Exception:
+        return None
+
+
+G_ACCENT = (ACCENT_DARK, hexc("#9C82FF"))    # حباب کاربر
+G_LOGO = (ACCENT_2, ACCENT)                  # لوگو و آواتار
+G_SEND = (ACCENT_DARK, BLUE)                 # دکمه‌ی ارسال
+
+
+def format_reply(text):
+    """نشانه‌گذاری‌های مارک‌داون (**، #، ```) را به متن تمیز تبدیل می‌کند. فقط نمایشی است."""
+    t = text.replace("\r", "")
+    t = re.sub(r"```[A-Za-z0-9_+\-]*\n?", "", t)
+    t = re.sub(r"\*\*(?=\S)([^\n]+?)(?<=\S)\*\*", r"\1", t)
+    t = re.sub(r"`([^`\n]+)`", r"\1", t)
+    t = re.sub(r"(?m)^\s{0,3}#{1,6}\s*", "", t)
+    t = re.sub(r"(?m)^(\s*)[-*•]\s+", r"\1• ", t)
+    t = re.sub(r"(?m)^\s*[-*_]{3,}\s*$", "", t)
+    t = re.sub(r"\n{3,}", "\n\n", t)
+    return t.strip()
+
+
+def load_chats():
+    path = _data_path("chats.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        return [c for c in data if isinstance(c, dict) and c.get("msgs")]
+    except Exception:
+        return []
+
+
+def save_chats(chats):
+    path = _data_path("chats.json")
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(chats, f, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 # ═════════════════════════ ویجت‌ها ═════════════════════════
 class Card(BoxLayout):
-    def __init__(self, bg=SURFACE, border=None, radius=16, **kwargs):
+    def __init__(self, bg=SURFACE, border=None, radius=16, grad=None, **kwargs):
         super().__init__(**kwargs)
         self.bg = bg
         self.border = border or bg
         r = [dp(radius)]
+        tex = gradient_texture(*grad) if grad else None
+        self._grad = tex is not None
         with self.canvas.before:
             self._border_c = Color(*self.border)
             self._border_r = RoundedRectangle(pos=self.pos, size=self.size, radius=r)
-            self._bg_c = Color(*self.bg)
-            self._bg_r = RoundedRectangle(pos=self.pos, size=self.size, radius=r)
+            self._bg_c = Color(*(WHITE if self._grad else self.bg))
+            if self._grad:
+                self._bg_r = RoundedRectangle(pos=self.pos, size=self.size, radius=r, texture=tex)
+            else:
+                self._bg_r = RoundedRectangle(pos=self.pos, size=self.size, radius=r)
         self.bind(pos=self._upd, size=self._upd)
 
     def _upd(self, *_):
@@ -781,7 +890,11 @@ class Card(BoxLayout):
         self._bg_r.size = (max(0, self.width - dp(2)), max(0, self.height - dp(2)))
 
     def set_bg(self, rgba):
-        self._bg_c.rgba = rgba
+        if not self._grad:
+            self._bg_c.rgba = rgba
+
+    def set_border(self, rgba):
+        self._border_c.rgba = rgba
 
 
 class TapCard(ButtonBehavior, Card):
@@ -804,6 +917,7 @@ class SLabel(Label):
         self.text = shape(raw)
 
 
+
 class Dot(Widget):
     def __init__(self, color, **kwargs):
         super().__init__(**kwargs)
@@ -819,12 +933,13 @@ class Dot(Widget):
         self._c.rgba = color
 
 
+
 class StatusPill(TapCard):
     """وضعیت مدل: آماده‌سازی / آماده / خاموش. با لمس، دوباره تلاش می‌کند."""
 
     def __init__(self, **kwargs):
         super().__init__(bg=SURFACE, border=BORDER, radius=15,
-                         size_hint=(None, None), size=(dp(100), dp(30)),
+                         size_hint=(None, None), size=(dp(96), dp(30)),
                          padding=[dp(10), 0], spacing=dp(6),
                          pos_hint={"center_y": 0.5}, **kwargs)
         self.dot = Dot(ORANGE, size_hint=(None, None), size=(dp(8), dp(8)), pos_hint={"center_y": 0.5})
@@ -835,6 +950,7 @@ class StatusPill(TapCard):
     def set(self, color, text):
         self.dot.set_color(color)
         self.lbl.text = shape(text)
+
 
 
 class PlusButton(TapCard):
@@ -855,11 +971,30 @@ class PlusButton(TapCard):
         self._v.points = [cx, cy - s, cx, cy + s]
 
 
+
+class MenuButton(TapCard):
+    """دکمه‌ی منو (سه خط)."""
+
+    def __init__(self, **kwargs):
+        super().__init__(bg=SURFACE, border=BORDER, radius=18, **kwargs)
+        with self.canvas.after:
+            Color(*TEXT)
+            self._lines = [Line(width=dp(1.6), cap="round") for _ in range(3)]
+        self.bind(pos=self._d, size=self._d)
+
+    def _d(self, *_):
+        cx, cy = self.center
+        w = dp(8)
+        for i, ln in enumerate(self._lines):
+            y = cy + (1 - i) * dp(5)
+            ln.points = [cx - w, y, cx + w, y]
+
+
 class SendButton(TapCard):
     """ارسال (فلش) / توقف (مربع)."""
 
     def __init__(self, **kwargs):
-        super().__init__(bg=ACCENT, border=ACCENT, radius=22, **kwargs)
+        super().__init__(bg=ACCENT, border=ACCENT, radius=22, grad=G_SEND, **kwargs)
         self.stop = False
         with self.canvas.after:
             Color(*WHITE)
@@ -883,6 +1018,56 @@ class SendButton(TapCard):
             s = min(self.width, self.height) * 0.22
             self._shaft.points = [cx, cy - s, cx, cy + s]
             self._head.points = [cx - s * 0.85, cy + s * 0.1, cx, cy + s * 1.05, cx + s * 0.85, cy + s * 0.1]
+
+
+class Chip(TapCard):
+    """دکمه‌ی کوچک زیر جواب (کپی، دوباره)."""
+
+    def __init__(self, text, **kwargs):
+        super().__init__(bg=SURFACE, border=BORDER, radius=14, size_hint=(None, None),
+                         size=(dp(76), dp(28)), padding=[dp(6), 0], **kwargs)
+        self.add_widget(SLabel(text, font_size=sp(11.5), color=MUTED, halign="center"))
+
+
+class Avatar(Card):
+    """آواتار کوچک دستیار کنار حباب جواب."""
+
+    def __init__(self, **kwargs):
+        super().__init__(bg=ACCENT, border=ACCENT, radius=15, grad=G_LOGO,
+                         size_hint=(None, None), size=(dp(30), dp(30)), **kwargs)
+        self.add_widget(Label(text="AI", font_name=FONT, font_size=sp(10.5), color=WHITE))
+
+
+class GlowLogo(Widget):
+    """لوگوی بزرگ صفحه‌ی خوش‌آمد با هاله‌ی نورانی."""
+
+    def __init__(self, **kwargs):
+        super().__init__(size_hint=(None, None), size=(dp(130), dp(130)), **kwargs)
+        tex = gradient_texture(*G_LOGO)
+        self._glows = []
+        with self.canvas:
+            for a in (0.05, 0.08, 0.13):
+                Color(*ACCENT[:3], a)
+                self._glows.append(Ellipse())
+            Color(*(WHITE if tex is not None else ACCENT))
+            if tex is not None:
+                self._sq = RoundedRectangle(radius=[dp(22)], texture=tex)
+            else:
+                self._sq = RoundedRectangle(radius=[dp(22)])
+        self.lbl = Label(text="AI", font_name=FONT, font_size=sp(26), color=WHITE, size_hint=(None, None))
+        self.add_widget(self.lbl)
+        self.bind(pos=self._u, size=self._u)
+
+    def _u(self, *_):
+        cx, cy = self.center
+        for e, d in zip(self._glows, (dp(128), dp(104), dp(84))):
+            e.size = (d, d)
+            e.pos = (cx - d / 2, cy - d / 2)
+        s = dp(68)
+        self._sq.size = (s, s)
+        self._sq.pos = (cx - s / 2, cy - s / 2)
+        self.lbl.size = (s, s)
+        self.lbl.pos = self._sq.pos
 
 
 class ChatText(BoxLayout):
@@ -951,6 +1136,7 @@ class ChatText(BoxLayout):
         self.size = (w + dp(2), total_h + pad * len(self._chunks))
 
 
+
 class TypingBubble(Card):
     def __init__(self, **kwargs):
         super().__init__(bg=SURFACE, border=BORDER, radius=18,
@@ -977,11 +1163,11 @@ class TypingBubble(Card):
         self._ev.cancel()
 
 
+
 # ═════════════════════════ برنامه ═════════════════════════
 class SearchApp(App):
     title = APP_TITLE
 
-    # ---------- چرخه‌ی زندگی ----------
     def on_pause(self):
         return True            # با رفتن به Termux برنامه بسته نشود
 
@@ -993,6 +1179,8 @@ class SearchApp(App):
         self.warm_up()
 
     # ---------- ساخت رابط ----------
+
+    # ---------- ساخت رابط ----------
     def build(self):
         apply_settings()
         self.busy = False
@@ -1001,6 +1189,12 @@ class SearchApp(App):
         self.typing_row = None
         self.stream_bub = None
         self.history = []
+        self.msgs = []                    # پیام‌های نمایش‌داده‌شده‌ی گفتگوی فعلی (برای ذخیره)
+        self.chats = load_chats()
+        self.chat_id = None
+        self._ex_widgets = []             # ویجت‌های آخرین پرسش و پاسخ (برای «دوباره»)
+        self._ex_saved = False
+        self._regen_chip = None
         self.req_id = 0
         self.cancel_ev = None
         self.status_kind = "loading"
@@ -1013,19 +1207,27 @@ class SearchApp(App):
         self._tick_ev = None
 
         root = BoxLayout(orientation="vertical")
+        bgtex = gradient_texture(BG, BG_TOP)
+        with root.canvas.before:
+            Color(*(WHITE if bgtex is not None else BG))
+            if bgtex is not None:
+                bg_rect = Rectangle(texture=bgtex, pos=root.pos, size=root.size)
+            else:
+                bg_rect = Rectangle(pos=root.pos, size=root.size)
+        root.bind(pos=lambda w, v: setattr(bg_rect, "pos", v), size=lambda w, v: setattr(bg_rect, "size", v))
 
-        header = BoxLayout(size_hint_y=None, height=dp(72), padding=[dp(14), dp(10)], spacing=dp(10))
-        self.plus = PlusButton(size_hint=(None, None), size=(dp(38), dp(38)), pos_hint={"center_y": 0.5})
+        header = BoxLayout(size_hint_y=None, height=dp(66), padding=[dp(12), dp(10)], spacing=dp(8))
+        self.menu_btn = MenuButton(size_hint=(None, None), size=(dp(36), dp(36)), pos_hint={"center_y": 0.5})
+        self.menu_btn.bind(on_release=lambda *_: self.open_menu())
+        self.plus = PlusButton(size_hint=(None, None), size=(dp(36), dp(36)), pos_hint={"center_y": 0.5})
         self.plus.bind(on_release=lambda *_: self.new_chat())
         self.status = StatusPill()
         self.status.bind(on_release=lambda *_: self.warm_up())
-        titles = BoxLayout(orientation="vertical", spacing=dp(1))
-        titles.add_widget(SLabel(APP_TITLE, font_size=sp(16.5), shorten=True))
-        titles.add_widget(SLabel(APP_SUBTITLE, font_size=sp(11), color=MUTED, shorten=True))
-        logo = Card(bg=ACCENT, border=ACCENT, radius=14, size_hint=(None, None),
-                    size=(dp(44), dp(44)), pos_hint={"center_y": 0.5})
-        logo.add_widget(Label(text="AI", font_name=FONT, font_size=sp(15), color=WHITE))
-        for w in (self.plus, self.status, titles, logo):
+        title = SLabel(APP_TITLE, font_size=sp(16.5), shorten=True)
+        logo = Card(bg=ACCENT, border=ACCENT, radius=13, grad=G_LOGO, size_hint=(None, None),
+                    size=(dp(40), dp(40)), pos_hint={"center_y": 0.5})
+        logo.add_widget(Label(text="AI", font_name=FONT, font_size=sp(14), color=WHITE))
+        for w in (self.menu_btn, self.plus, self.status, title, logo):
             header.add_widget(w)
         root.add_widget(header)
 
@@ -1047,14 +1249,14 @@ class SearchApp(App):
         self.scroll = ScrollView(do_scroll_x=False, bar_width=dp(3),
                                  bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
         self.chat = BoxLayout(orientation="vertical", size_hint_y=None,
-                              padding=[dp(14), dp(16)], spacing=dp(10))
+                              padding=[dp(14), dp(14)], spacing=dp(10))
         self.chat.bind(minimum_height=self.chat.setter("height"))
         self.scroll.add_widget(self.chat)
         root.add_widget(self.scroll)
 
         bar = BoxLayout(size_hint_y=None, height=dp(78), padding=[dp(12), dp(10)])
-        field = Card(bg=SURFACE, border=BORDER, radius=28,
-                     padding=[dp(8), dp(6), dp(16), dp(6)], spacing=dp(8))
+        self.field = Card(bg=SURFACE, border=BORDER, radius=28,
+                          padding=[dp(8), dp(6), dp(16), dp(6)], spacing=dp(8))
         self.send_btn = SendButton(size_hint=(None, None), size=(dp(44), dp(44)), pos_hint={"center_y": 0.5})
         self.send_btn.bind(on_release=lambda *_: self.on_send_btn())
         self.input = TextInput(
@@ -1066,9 +1268,10 @@ class SearchApp(App):
         )
         self.input.bind(height=lambda w, h: setattr(w, "padding_y", [max(0, (h - w.line_height) / 2)] * 2))
         self.input.bind(on_text_validate=lambda *_: self.on_submit())
-        field.add_widget(self.send_btn)
-        field.add_widget(self.input)
-        bar.add_widget(field)
+        self.input.bind(focus=lambda w, v: self.field.set_border(ACCENT if v else BORDER))
+        self.field.add_widget(self.send_btn)
+        self.field.add_widget(self.input)
+        bar.add_widget(self.field)
         root.add_widget(bar)
 
         self._show_welcome()
@@ -1151,6 +1354,7 @@ class SearchApp(App):
         st("lite" if local else "off")
 
     # ---------- انتخاب مدل هوش مصنوعی ----------
+
     def _refresh_model_bar(self):
         direct = BACKEND.get("cloud") == "direct"
         self.model_wrap.height = dp(42) if direct else 0
@@ -1158,13 +1362,55 @@ class SearchApp(App):
         self.model_wrap.disabled = not direct
         self.model_lbl.text = shape("مدل هوش مصنوعی:  " + cf_label(BACKEND.get("cf_model") or CF_DEFAULT))
 
+    # ---------- پنجره‌ها ----------
+    def _popup(self, title, content, height):
+        return Popup(title=shape(title), title_font=FONT, title_color=TEXT, separator_height=0,
+                     content=content, size_hint=(0.94, None), height=min(height, Window.height * 0.88),
+                     background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
+
+    def _flash(self, msg):
+        """پیام کوتاه روی نشانگر وضعیت (مثلاً «کپی شد»)."""
+        self.status.set(GREEN, msg)
+        Clock.schedule_once(lambda dt: self._restore_status(), 1.3)
+
+    def _restore_status(self):
+        if not self.busy:
+            self.set_status(self.status_kind)
+
+    def _menu_item(self, text, hint, cb, pop):
+        card = TapCard(bg=SURFACE, border=BORDER, radius=16, size_hint_y=None, height=dp(58),
+                       padding=[dp(16), 0], spacing=dp(8))
+        col = BoxLayout(orientation="vertical", spacing=dp(1))
+        col.add_widget(SLabel(text, font_size=sp(14.5)))
+        col.add_widget(SLabel(hint, font_size=sp(11), color=MUTED))
+        card.add_widget(col)
+
+        def go(*_):
+            pop.dismiss()
+            Clock.schedule_once(lambda dt: cb(), 0.12)
+        card.bind(on_release=go)
+        return card
+
+    def open_menu(self):
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(10))
+        pop = self._popup("منو", box, dp(380))
+        pname = next((n for k, n, _h, _a in PERSONAS if k == PERSONA["key"]), "پیش‌فرض")
+        fname = next((n for n, v in FONT_SCALES if abs(v - UI["scale"]) < 0.01), "متوسط")
+        items = [
+            ("گفتگوهای قبلی", "%d گفتگوی ذخیره‌شده" % len(self.chats), self.open_history),
+            ("حالت دستیار", pname, self.open_persona),
+            ("اندازه‌ی متن", fname, self.open_fontsize),
+            ("تنظیمات اتصال", "Cloudflare / کامپیوتر", self.open_settings),
+        ]
+        for t, h, cb in items:
+            box.add_widget(self._menu_item(t, h, cb, pop))
+        box.add_widget(Widget())
+        pop.open()
+
     def open_model_picker(self):
         cur = BACKEND.get("cf_model") or CF_DEFAULT
         box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
-        pop = Popup(title=shape("انتخاب مدل هوش مصنوعی"), title_font=FONT, title_color=TEXT,
-                    separator_height=0, content=box, size_hint=(0.94, None),
-                    height=min(dp(560), Window.height * 0.85),
-                    background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
+        pop = self._popup("انتخاب مدل هوش مصنوعی", box, dp(560))
 
         def pick(_w, mid):
             set_cf_model(mid)
@@ -1192,38 +1438,103 @@ class SearchApp(App):
                               color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
         pop.open()
 
-    # ---------- صفحه‌ی خوش‌آمد ----------
-    def _show_welcome(self):
-        w = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10), padding=[0, dp(10)])
-        w.bind(minimum_height=w.setter("height"))
+    def open_persona(self):
+        cur = PERSONA["key"]
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        pop = self._popup("حالت دستیار", box, dp(520))
 
-        logo_row = BoxLayout(size_hint_y=None, height=dp(72))
-        logo_row.add_widget(Widget())
-        big = Card(bg=ACCENT, border=ACCENT_2, radius=22, size_hint=(None, None), size=(dp(72), dp(72)))
-        big.add_widget(Label(text="AI", font_name=FONT, font_size=sp(24), color=WHITE))
-        logo_row.add_widget(big)
-        logo_row.add_widget(Widget())
-        w.add_widget(logo_row)
+        def pick(_w, key):
+            data = load_settings()
+            data["persona"] = key
+            save_settings(data)
+            PERSONA["key"] = key
+            pop.dismiss()
+            self._flash("ذخیره شد")
 
-        w.add_widget(SLabel("سلام! چه می‌خواهید بدانید؟", font_size=sp(21),
-                            halign="center", size_hint_y=None, height=dp(44)))
-        w.add_widget(SLabel("ریاضی، تحقیق، آشپزی، گفتگو و ...", font_size=sp(13), color=MUTED,
-                            halign="center", size_hint_y=None, height=dp(22)))
-        w.add_widget(Widget(size_hint_y=None, height=dp(10)))
-        w.add_widget(SLabel("پیشنهادها", font_size=sp(12), color=MUTED, size_hint_y=None, height=dp(22)))
-        for s in SUGGESTIONS:
-            chip = TapCard(bg=SURFACE, border=BORDER, radius=16, size_hint_y=None,
-                           height=dp(52), padding=[dp(16), 0])
-            chip.add_widget(SLabel(s, font_size=sp(14.5), shorten=True))
-            chip.bind(on_release=lambda _w, q=s: self.on_submit(q))
-            w.add_widget(chip)
-        pc_chip = TapCard(bg=BG, border=BORDER, radius=16, size_hint_y=None, height=dp(44), padding=[dp(16), 0])
-        pc_chip.add_widget(SLabel("تنظیمات اتصال (ابر / کامپیوتر)", font_size=sp(13), color=MUTED, shorten=True))
-        pc_chip.bind(on_release=lambda *_: self.open_settings())
-        w.add_widget(Widget(size_hint_y=None, height=dp(6)))
-        w.add_widget(pc_chip)
-        self.welcome = w
-        self.chat.add_widget(w)
+        for key, name, hint, _extra in PERSONAS:
+            sel = (key == cur)
+            card = TapCard(bg=ACCENT if sel else SURFACE, border=ACCENT_2 if sel else BORDER, radius=14,
+                           size_hint_y=None, height=dp(58), padding=[dp(16), 0])
+            col = BoxLayout(orientation="vertical", spacing=dp(1))
+            col.add_widget(SLabel(name, font_size=sp(14.5), color=WHITE if sel else TEXT))
+            col.add_widget(SLabel(hint, font_size=sp(11), color=WHITE if sel else MUTED))
+            card.add_widget(col)
+            card.bind(on_release=lambda w, k=key: pick(w, k))
+            box.add_widget(card)
+        box.add_widget(SLabel("حالت «پیش‌فرض» رفتار هوش مصنوعی را اصلاً تغییر نمی‌دهد", font_size=sp(11),
+                              color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
+        pop.open()
+
+    def open_fontsize(self):
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        pop = self._popup("اندازه‌ی متن", box, dp(400))
+
+        def pick(_w, v):
+            data = load_settings()
+            data["font_scale"] = v
+            save_settings(data)
+            UI["scale"] = v
+            pop.dismiss()
+            if not self.busy:
+                self._render_chat()
+
+        for name, v in FONT_SCALES:
+            sel = abs(v - UI["scale"]) < 0.01
+            card = TapCard(bg=ACCENT if sel else SURFACE, border=ACCENT_2 if sel else BORDER, radius=14,
+                           size_hint_y=None, height=dp(52), padding=[dp(16), 0])
+            card.add_widget(SLabel(name, font_size=sp(15 * v), color=WHITE if sel else TEXT))
+            card.bind(on_release=lambda w, x=v: pick(w, x))
+            box.add_widget(card)
+        pop.open()
+
+    def open_history(self):
+        box = BoxLayout(orientation="vertical", padding=dp(12), spacing=dp(8))
+        pop = self._popup("گفتگوهای قبلی", box, dp(580))
+        if not self.chats:
+            box.add_widget(SLabel("هنوز گفتگویی ذخیره نشده است", color=MUTED, halign="center"))
+        else:
+            items = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
+            items.bind(minimum_height=items.setter("height"))
+            for chat in sorted(self.chats, key=lambda c: c.get("ts", 0), reverse=True):
+                row = BoxLayout(size_hint_y=None, height=dp(58), spacing=dp(8))
+                del_btn = TapCard(bg=ERR_BG, border=ERR_BORDER, radius=14, size_hint=(None, 1), width=dp(54))
+                del_btn.add_widget(SLabel("حذف", font_size=sp(12), color=ERR_TEXT, halign="center"))
+                card = TapCard(bg=SURFACE, border=BORDER, radius=14, padding=[dp(14), 0])
+                col = BoxLayout(orientation="vertical", spacing=dp(1))
+                col.add_widget(SLabel(chat.get("title") or "گفتگو", font_size=sp(14), shorten=True))
+                col.add_widget(SLabel(time.strftime("%m/%d  %H:%M", time.localtime(chat.get("ts", 0))),
+                                      font_size=sp(10.5), color=MUTED))
+                card.add_widget(col)
+
+                def open_it(_w, c=chat):
+                    pop.dismiss()
+                    self.open_chat(c)
+
+                def del_it(_w, c=chat):
+                    self.delete_chat(c)
+                    pop.dismiss()
+                    Clock.schedule_once(lambda dt: self.open_history(), 0.12)
+
+                card.bind(on_release=open_it)
+                del_btn.bind(on_release=del_it)
+                row.add_widget(del_btn)
+                row.add_widget(card)
+                items.add_widget(row)
+            sv = ScrollView(do_scroll_x=False, bar_width=dp(3),
+                            bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
+            sv.add_widget(items)
+            box.add_widget(sv)
+            clear_all = TapCard(bg=ERR_BG, border=ERR_BORDER, radius=14, size_hint_y=None, height=dp(44))
+            clear_all.add_widget(SLabel("حذف همه‌ی گفتگوها", font_size=sp(13), color=ERR_TEXT, halign="center"))
+
+            def del_all(*_):
+                self.chats = []
+                save_chats(self.chats)
+                pop.dismiss()
+                self.new_chat()
+            clear_all.bind(on_release=del_all)
+            box.add_widget(clear_all)
+        pop.open()
 
     def open_settings(self):
         st = load_settings()
@@ -1258,9 +1569,11 @@ class SearchApp(App):
                     background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
 
         def save(*_):
-            save_settings({"cf_account": cf_acc.text.strip(), "cf_token": cf_tok.text.strip(),
-                           "pc_url": url_in.text.strip(), "pc_model": model_in.text.strip() or "qwen3:8b",
-                           "cf_model": st.get("cf_model", CF_DEFAULT)})
+            cur = load_settings()
+            cur.update({"cf_account": cf_acc.text.strip(), "cf_token": cf_tok.text.strip(),
+                        "pc_url": url_in.text.strip(),
+                        "pc_model": model_in.text.strip() or "qwen3:8b"})
+            save_settings(cur)
             apply_settings()
             self._refresh_model_bar()
             pop.dismiss()
@@ -1285,43 +1598,219 @@ class SearchApp(App):
         pop.open()
 
     # ---------- حباب‌ها ----------
+
+
+    # ---------- صفحه‌ی خوش‌آمد ----------
+    def _show_welcome(self):
+        w = BoxLayout(orientation="vertical", size_hint_y=None, spacing=dp(10), padding=[0, dp(6)])
+        w.bind(minimum_height=w.setter("height"))
+
+        logo_row = BoxLayout(size_hint_y=None, height=dp(136))
+        logo_row.add_widget(Widget())
+        logo_row.add_widget(GlowLogo())
+        logo_row.add_widget(Widget())
+        w.add_widget(logo_row)
+
+        w.add_widget(SLabel("سلام! چه می‌خواهید بدانید؟", font_size=sp(21),
+                            halign="center", size_hint_y=None, height=dp(40)))
+        w.add_widget(SLabel("ریاضی، تحقیق، آشپزی، گفتگو و ...", font_size=sp(13), color=MUTED,
+                            halign="center", size_hint_y=None, height=dp(22)))
+        w.add_widget(Widget(size_hint_y=None, height=dp(6)))
+        w.add_widget(SLabel("پیشنهادها", font_size=sp(12), color=MUTED, size_hint_y=None, height=dp(22)))
+        for i, s in enumerate(SUGGESTIONS):
+            chip = TapCard(bg=SURFACE, border=BORDER, radius=16, size_hint_y=None,
+                           height=dp(54), padding=[dp(12), 0], spacing=dp(10))
+            num = Card(bg=ACCENT, border=ACCENT, radius=13, grad=G_LOGO, size_hint=(None, None),
+                       size=(dp(26), dp(26)), pos_hint={"center_y": 0.5})
+            num.add_widget(Label(text=str(i + 1), font_name=FONT, font_size=sp(12), color=WHITE))
+            chip.add_widget(num)
+            chip.add_widget(SLabel(s, font_size=sp(14.5), shorten=True))
+            chip.bind(on_release=lambda _w, q=s: self.on_submit(q))
+            w.add_widget(chip)
+        self.welcome = w
+        self.chat.add_widget(w)
+
+    # ---------- حباب‌ها ----------
     def _style(self, kind):
+        k = UI["scale"]
         return {
-            "user": dict(bg=ACCENT, border=ACCENT, color=WHITE, px=sp(15.5), pad=(14, 10)),
-            "bot": dict(bg=SURFACE, border=BORDER, color=TEXT, px=sp(15.5), pad=(14, 11)),
-            "error": dict(bg=ERR_BG, border=ERR_BORDER, color=ERR_TEXT, px=sp(15), pad=(14, 10)),
-            "source": dict(bg=BG, border=BORDER, color=MUTED, px=sp(12), pad=(12, 6)),
+            "user": dict(bg=ACCENT, border=ACCENT, color=WHITE, px=sp(15.5) * k, pad=(14, 10), grad=G_ACCENT),
+            "bot": dict(bg=SURFACE, border=BORDER, color=TEXT, px=sp(15.5) * k, pad=(14, 11), grad=None),
+            "error": dict(bg=ERR_BG, border=ERR_BORDER, color=ERR_TEXT, px=sp(15) * k, pad=(14, 10), grad=None),
+            "source": dict(bg=BG, border=BORDER, color=MUTED, px=sp(12), pad=(12, 6), grad=None),
         }[kind]
 
     def _bubble(self, raw, kind):
         st = self._style(kind)
         padx, pady = dp(st["pad"][0]), dp(st["pad"][1])
-        max_inner = Window.width * 0.84 - 2 * padx
+        if kind == "user":
+            outer = Window.width * 0.84
+        else:
+            outer = Window.width - dp(28) - dp(42) - dp(14)      # فضای آواتار را کم می‌کند
+        max_inner = outer - 2 * padx
         lbl = ChatText(color=st["color"], font_px=st["px"])
         lbl.set_text(raw, max_inner)
-        bub = Card(bg=st["bg"], border=st["border"], radius=18 if kind != "source" else 12,
-                   size_hint=(None, None), padding=[padx, pady],
-                   size=(lbl.width + 2 * padx, lbl.height + 2 * pady))
+        cls = TapCard if kind == "user" else Card
+        bub = cls(bg=st["bg"], border=st["border"], radius=18 if kind != "source" else 12, grad=st["grad"],
+                  size_hint=(None, None), padding=[padx, pady],
+                  size=(lbl.width + 2 * padx, lbl.height + 2 * pady))
         bub.add_widget(lbl)
         bub.label = lbl
         bub.max_inner, bub.padx, bub.pady = max_inner, padx, pady
+        if kind == "user":
+            bub.bind(on_release=lambda *_: self._edit_text(raw))       # لمس پیام = ویرایش و ارسال دوباره
         return bub
 
-    def _row(self, widget, side):
-        row = BoxLayout(size_hint_y=None, height=widget.height)
+    def _edit_text(self, raw):
+        if self.busy:
+            return
+        self.input.text = raw
+        self.input.focus = True
+
+    def _add_plain(self, widget, animate=True):
+        if animate:
+            widget.opacity = 0
+            Animation(opacity=1, duration=0.22).start(widget)
+        self.chat.add_widget(widget)
+        self._scroll_bottom()
+
+    def _row(self, widget, side, avatar=False, indent=False, animate=True):
+        row = BoxLayout(size_hint_y=None, height=widget.height, spacing=dp(6))
         widget.bind(height=lambda _w, h: setattr(row, "height", h))
         if side == "right":
             row.add_widget(Widget())
             row.add_widget(widget)
         else:
+            if avatar:
+                col = BoxLayout(orientation="vertical", size_hint=(None, 1), width=dp(30))
+                col.add_widget(Widget())
+                col.add_widget(Avatar())
+                row.add_widget(col)
+            elif indent:
+                row.add_widget(Widget(size_hint_x=None, width=dp(30)))
             row.add_widget(widget)
             row.add_widget(Widget())
-        self.chat.add_widget(row)
-        self._scroll_bottom()
+        self._add_plain(row, animate)
         return row
 
     def _scroll_bottom(self):
         Clock.schedule_once(lambda dt: setattr(self.scroll, "scroll_y", 0), 0.04)
+
+    # ---------- گفتگو ----------
+
+    # ---------- دکمه‌های زیر جواب ----------
+    def _actions(self, text, regen):
+        row = BoxLayout(size_hint_y=None, height=dp(32), spacing=dp(8), padding=[dp(38), dp(2), 0, 0])
+        if text:
+            cp = Chip("کپی")
+            cp.bind(on_release=lambda *_: self.copy_text(text))
+            row.add_widget(cp)
+        if regen:
+            rg = Chip("دوباره")
+            rg.bind(on_release=lambda *_: self.regenerate())
+            row.add_widget(rg)
+            self._regen_chip = (row, rg)
+        row.add_widget(Widget())
+        return row
+
+    def _shrink_actions(self):
+        """وقتی پیام تازه می‌آید، «دوباره» فقط برای آخرین جواب می‌ماند."""
+        if self._regen_chip is not None:
+            row, chip = self._regen_chip
+            try:
+                row.remove_widget(chip)
+            except Exception:
+                pass
+            self._regen_chip = None
+
+    def copy_text(self, text):
+        try:
+            Clipboard.copy(text)
+            self._flash("کپی شد")
+        except Exception:
+            self._flash("کپی نشد")
+
+    def regenerate(self):
+        if self.busy or not self._last_query:
+            return
+        q = self._last_query
+        for w in self._ex_widgets:
+            try:
+                self.chat.remove_widget(w)
+            except Exception:
+                pass
+        self._ex_widgets = []
+        if self._ex_saved and len(self.msgs) >= 2:
+            self.msgs = self.msgs[:-2]
+        self.history = self._model_history()
+        self._regen_chip = None
+        self.on_submit(q)
+
+    # ---------- حافظه و ذخیره‌ی گفتگوها ----------
+    def _model_history(self):
+        h = []
+        for m in self.msgs:
+            if m["role"] == "user":
+                h.append({"role": "user", "content": m["text"][:200]})
+            else:
+                h.append({"role": "assistant", "content": m["text"][:600]})
+        return h[-HISTORY_MESSAGES:]
+
+    def _persist(self):
+        if not self.msgs:
+            return
+        if self.chat_id is None:
+            self.chat_id = str(int(time.time() * 1000))
+        first = next((m["text"] for m in self.msgs if m["role"] == "user"), "گفتگو")
+        entry = {"id": self.chat_id, "title": first[:40], "ts": time.time(), "msgs": self.msgs[-60:]}
+        self.chats = [c for c in self.chats if c.get("id") != self.chat_id]
+        self.chats.append(entry)
+        self.chats = sorted(self.chats, key=lambda c: c.get("ts", 0))[-40:]
+        save_chats(self.chats)
+
+    def _render_chat(self):
+        """گفتگوی فعلی (self.msgs) را از نو روی صفحه می‌سازد."""
+        self.chat.clear_widgets()
+        self.welcome = None
+        self.stream_bub = None
+        self._ex_widgets = []
+        self._regen_chip = None
+        if not self.msgs:
+            self._last_query = ""
+            self._ex_saved = False
+            self._show_welcome()
+            return
+        last = len(self.msgs) - 1
+        ex = []
+        for i, m in enumerate(self.msgs):
+            if m["role"] == "user":
+                ex = [self._row(self._bubble(m["text"], "user"), "right", animate=False)]
+                self._last_query = m["text"]
+            else:
+                ex.append(self._row(self._bubble(m["text"], "bot"), "left", avatar=True, animate=False))
+                if m.get("src"):
+                    ex.append(self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, m["src"]), "source"),
+                                        "left", indent=True, animate=False))
+                act = self._actions(m["text"], regen=(i == last))
+                self._add_plain(act, animate=False)
+                ex.append(act)
+        self._ex_widgets = ex
+        self._ex_saved = self.msgs[-1]["role"] == "bot"
+        self.history = self._model_history()
+        self._scroll_bottom()
+
+    def open_chat(self, chat):
+        if self.busy:
+            self.stop_generation()
+        self.chat_id = chat.get("id")
+        self.msgs = list(chat.get("msgs") or [])
+        self._render_chat()
+
+    def delete_chat(self, chat):
+        self.chats = [c for c in self.chats if c.get("id") != chat.get("id")]
+        save_chats(self.chats)
+        if chat.get("id") == self.chat_id:
+            self.new_chat()
 
     # ---------- گفتگو ----------
     def on_send_btn(self):
@@ -1334,6 +1823,8 @@ class SearchApp(App):
         query = (preset if isinstance(preset, str) else self.input.text).strip()
         if not query or self.busy:
             return
+        self._shrink_actions()
+        self._ex_saved = False
         self.busy = True
         self.send_btn.set_stop(True)
         self.set_status("busy")
@@ -1343,9 +1834,10 @@ class SearchApp(App):
             self.chat.remove_widget(self.welcome)
             self.welcome = None
 
-        self._row(self._bubble(query, "user"), "right")
+        user_row = self._row(self._bubble(query, "user"), "right")
+        self._ex_widgets = [user_row]
         self.typing = TypingBubble()
-        self.typing_row = self._row(self.typing, "left")
+        self.typing_row = self._row(self.typing, "left", avatar=True)
 
         self.req_id += 1
         rid = self.req_id
@@ -1389,9 +1881,10 @@ class SearchApp(App):
 
     def new_chat(self):
         self.stop_generation()
-        self.chat.clear_widgets()
+        self.chat_id = None
+        self.msgs = []
         self.history = []
-        self._show_welcome()
+        self._render_chat()
 
     def _run_query(self, query, rid, ev, history):
         def push(text):
@@ -1418,10 +1911,11 @@ class SearchApp(App):
             self.typing_row = None
 
     def _set_bot_text(self, text):
+        text = format_reply(text)
         if self.stream_bub is None:
             self._drop_typing()
             self.stream_bub = self._bubble(text, "bot")
-            self._row(self.stream_bub, "left")
+            self._ex_widgets.append(self._row(self.stream_bub, "left", avatar=True))
         else:
             b = self.stream_bub
             b.label.set_text(text, b.max_inner)
@@ -1439,12 +1933,20 @@ class SearchApp(App):
         if res["error"]:
             self._drop_typing()
             if self.stream_bub is None:
-                self._row(self._bubble(res["text"], "error"), "left")
+                self._ex_widgets.append(self._row(self._bubble(res["text"], "error"), "left", avatar=True))
+            act = self._actions(None, regen=True)
+            self._add_plain(act)
+            self._ex_widgets.append(act)
         else:
-            self._set_bot_text(res["text"])
-            self.history += [{"role": "user", "content": self._last_query[:200]},
-                             {"role": "assistant", "content": res["text"][:600]}]
-            self.history = self.history[-HISTORY_MESSAGES:]
+            text = format_reply(res["text"])
+            self._set_bot_text(text)
+            src = None
+            if res.get("title"):
+                src = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
+            self.msgs += [{"role": "user", "text": self._last_query},
+                          {"role": "bot", "text": text, "src": src}]
+            self._ex_saved = True
+            self.history = self._model_history()
             if SHOW_DEBUG:
                 try:
                     lb = self.stream_bub.label
@@ -1452,11 +1954,16 @@ class SearchApp(App):
                         len(res["text"]), sum(len(c.text) for c in lb._chunks), len(lb._chunks), lb.height)
                 except Exception:
                     ui = ""
-                self._row(self._bubble((DEBUG["line"] or "no-api") + ui, "source"), "left")
+                self._ex_widgets.append(self._row(self._bubble((DEBUG["line"] or "no-api") + ui, "source"),
+                                                  "left", indent=True))
                 DEBUG["line"] = ""
-            if res.get("title"):
-                short = res["title"] if len(res["title"]) <= 30 else res["title"][:29] + "…"
-                self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, short), "source"), "left")
+            if src:
+                self._ex_widgets.append(self._row(self._bubble("منبع: %s · %s" % (SOURCE_NAME, src), "source"),
+                                                  "left", indent=True))
+            act = self._actions(text, regen=True)
+            self._add_plain(act)
+            self._ex_widgets.append(act)
+            self._persist()
         self.stream_bub = None
         self.busy = False
         self._stop_ticker()
