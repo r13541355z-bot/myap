@@ -62,11 +62,17 @@ CF_API_TOKEN = ""
 # مدل‌هایی که کاربر از داخل برنامه انتخاب می‌کند: (نام نمایشی، شناسه‌ی Cloudflare، اندازه)
 CF_CHOICES = [
     ("gpt-oss-120b", "@cf/openai/gpt-oss-120b", "117B"),
+    ("glm-5.3", "@cf/zai-org/glm-5.3", "753B"),
+    ("deepseek-v4-pro-0813", "@cf/deepseek-ai/deepseek-v4-pro-0813", "1.6T"),
     ("qwen3.8-27b", "@cf/qwen/qwen3.8-27b", "27B"),
     ("qwen3-30b-a3b", "@cf/qwen/qwen3-30b-a3b-fp8", "30B"),
     ("llama-3.2-3b", "@cf/meta/llama-3.2-3b-instruct", "3B"),
 ]
 CF_DEFAULT = CF_CHOICES[0][1]
+# مدل‌های «فکرکن» قبل از جواب چند صد توکن فکر می‌کنند. اگر سقف توکن کم باشد، فکرشان جواب را می‌بلعد
+# و جواب خالی یا ناقص می‌شود. این ضریب‌ها فقط «اجازه» می‌دهند فکر و جواب کامل شوند؛
+# مصرف واقعی همان مقداری است که مدل لازم دارد. هوش مدل و پرامپت‌ها دست‌نخورده می‌مانند.
+REASONING_BOOST = {"gpt-oss": (2, 300), "glm-5": (3, 1500), "deepseek-v4": (3, 1500)}
 CF_WARM_MODEL = "@cf/meta/llama-3.2-3b-instruct"   # فقط برای تست اتصال هنگام باز شدن برنامه
 
 
@@ -427,12 +433,14 @@ SHOW_DEBUG = True                    # برای دیدن خط تشخیصی زی�
 
 def _cf_call(model, msgs, max_tokens, temperature):
     """یک درخواست به Cloudflare Workers AI (آدرس سازگار با OpenAI = فرمت یکسان برای همه‌ی مدل‌ها)."""
-    if "gpt-oss" in model:
-        max_tokens = max(max_tokens * 2, 300)   # این مدل‌ها بخشی از توکن را صرف فکر کردن می‌کنند
+    for key, (mult, floor) in REASONING_BOOST.items():
+        if key in model:
+            max_tokens = max(max_tokens * mult, floor)
+            break
     r = requests.post(
         "https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % BACKEND["cf_account"],
         json={"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
-        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=120)
+        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=240)
     if r.status_code >= 400:
         raise CFError(r.status_code, r.text or "")
     data = r.json()
@@ -1148,13 +1156,14 @@ class SearchApp(App):
         self.model_wrap.height = dp(42) if direct else 0
         self.model_wrap.opacity = 1 if direct else 0
         self.model_wrap.disabled = not direct
-        self.model_lbl.text = shape("انتخاب مدل هوش مصنوعی:  " + cf_label(BACKEND.get("cf_model") or CF_DEFAULT))
+        self.model_lbl.text = shape("مدل هوش مصنوعی:  " + cf_label(BACKEND.get("cf_model") or CF_DEFAULT))
 
     def open_model_picker(self):
         cur = BACKEND.get("cf_model") or CF_DEFAULT
         box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
         pop = Popup(title=shape("انتخاب مدل هوش مصنوعی"), title_font=FONT, title_color=TEXT,
-                    separator_height=0, content=box, size_hint=(0.94, None), height=dp(400),
+                    separator_height=0, content=box, size_hint=(0.94, None),
+                    height=min(dp(560), Window.height * 0.85),
                     background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
 
         def pick(_w, mid):
@@ -1162,15 +1171,21 @@ class SearchApp(App):
             self._refresh_model_bar()
             pop.dismiss()
 
+        items = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
+        items.bind(minimum_height=items.setter("height"))
         for label, mid, size in CF_CHOICES:
             sel = (mid == cur)
             card = TapCard(bg=ACCENT if sel else SURFACE, border=ACCENT_2 if sel else BORDER, radius=14,
                            size_hint_y=None, height=dp(54), padding=[dp(14), 0], spacing=dp(8))
             card.add_widget(SLabel(size, font_size=sp(11.5), color=WHITE if sel else MUTED,
                                    size_hint_x=None, width=dp(60), halign="left"))
-            card.add_widget(SLabel(label, font_size=sp(14.5), color=WHITE if sel else TEXT))
+            card.add_widget(SLabel(label, font_size=sp(14.5), color=WHITE if sel else TEXT, shorten=True))
             card.bind(on_release=lambda w, m=mid: pick(w, m))
-            box.add_widget(card)
+            items.add_widget(card)
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3),
+                        bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
+        sv.add_widget(items)
+        box.add_widget(sv)
         box.add_widget(SLabel("سهمیه‌ی روزانه‌ی Cloudflare طبق مستندات بین مدل‌ها مشترک است", font_size=sp(11),
                               color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
         box.add_widget(SLabel("و حدود ساعت ۰۳:۳۰ بامداد (به وقت ایران) تمدید می‌شود", font_size=sp(11),
