@@ -1374,6 +1374,7 @@ class SearchApp(App):
         self._tick_ev = None
 
         root = BoxLayout(orientation="vertical")
+        self._root = root
         bgtex = gradient_texture(BG, BG_TOP)
         with root.canvas.before:
             Color(*(WHITE if bgtex is not None else BG))
@@ -1418,7 +1419,7 @@ class SearchApp(App):
                                 size_hint_y=None, height=dp(20), shorten=True)
         self.model_wrap.add_widget(prov_row)
         self.model_wrap.add_widget(self.model_lbl)
-        root.add_widget(self.model_wrap)
+        # model_wrap فقط وقتی کلیدی وارد شده باشد به صفحه اضافه می‌شود (_refresh_model_bar).
 
         self.scroll = ScrollView(do_scroll_x=False, bar_width=dp(3),
                                  bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
@@ -1541,9 +1542,12 @@ class SearchApp(App):
         st = load_settings()
         direct = BACKEND.get("cloud") == "direct"
         show = (direct or any(p.ready(st) for p in PROVIDER_LIST)) and not BACKEND.get("pc")
-        self.model_wrap.height = dp(66) if show else 0
-        self.model_wrap.opacity = 1 if show else 0
-        self.model_wrap.disabled = not show
+        # مهم: ویجت پنهان باید از صفحه «برداشته» شود. با ارتفاع صفر، فرزندهای ثابت‌اندازه‌اش
+        # روی هدر می‌افتادند و لمس دکمه‌های بالا را می‌بلعیدند.
+        if show and self.model_wrap.parent is None:
+            self._root.add_widget(self.model_wrap, index=2)      # درست زیر خط جداکننده‌ی هدر
+        elif not show and self.model_wrap.parent is not None:
+            self._root.remove_widget(self.model_wrap)
         cur = active_provider() if direct else None
         for p in PROVIDER_LIST:
             self.prov_chips[p.key].refresh(p.key == cur, p.ready(st))
