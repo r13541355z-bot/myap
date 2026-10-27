@@ -17,6 +17,8 @@
   5) حافظه‌ی گفتگو جواب‌های بلندتری نگه می‌دارد (600 به‌جای 300 نویسه).
 """
 import ast
+from dataclasses import dataclass
+from typing import NamedTuple
 import json
 import math
 import os
@@ -80,9 +82,111 @@ REASONING_BOOST = {"gpt-oss": (2, 300), "qwen3.8": (3, 1500), "nemotron": (3, 15
 CF_WARM_MODEL = "@cf/meta/llama-3.2-3b-instruct"   # فقط برای تست اتصال هنگام باز شدن برنامه
 
 
-def cf_label(model_id):
-    return next((l for l, m, _ in CF_CHOICES if m == model_id), model_id)
+# --- OpenRouter (مدل‌های :free؛ نام‌ها ممکن است عوض شوند، برای بقیه از کادر «شناسه‌ی دلخواه» استفاده کنید) ---
+OR_CHOICES = [
+    ("openrouter/free (خودکار)", "openrouter/free", "auto"),
+    ("gpt-oss-120b (free)", "openai/gpt-oss-120b:free", "117B"),
+    ("nemotron-3-super-120b (free)", "nvidia/nemotron-3-super-120b-a12b:free", "120B"),
+    ("qwen3-next-80b (free)", "qwen/qwen3-next-80b-a3b-instruct:free", "80B"),
+    ("gpt-oss-20b (free)", "openai/gpt-oss-20b:free", "20B"),
+]
+# --- Hugging Face (Inference Providers) ---
+HF_CHOICES = [
+    ("gpt-oss-120b", "openai/gpt-oss-120b", "117B"),
+    ("DeepSeek-V3.2", "deepseek-ai/DeepSeek-V3.2", ""),
+    ("Llama-3.3-70B-Instruct", "meta-llama/Llama-3.3-70B-Instruct", "70B"),
+    ("Qwen3-8B", "Qwen/Qwen3-8B", "8B"),
+]
 
+
+class ModelOption(NamedTuple):
+    """یک مدل آماده در فهرست هر بخش."""
+    label: str
+    id: str
+    size: str
+
+
+@dataclass(frozen=True)
+class Provider:
+    """
+    یک بخش هوش مصنوعی. هر سه بخش (Cloudflare، OpenRouter، Hugging Face) با فرمت OpenAI کار می‌کنند،
+    پس فقط آدرس، سرآیند، کلید و متن‌ها فرق دارند و منطق گفتگو برای همه یکی است.
+    """
+    key: str            # شناسه‌ی کوتاه: cf | or | hf
+    name: str           # نام نمایشی
+    tagline: str        # توضیح یک‌خطی
+    models: tuple       # مدل‌های آماده (ModelOption)
+    notes: tuple        # توضیح‌های پایین فهرست مدل‌ها
+    quota_msg: str      # پیام تمام‌شدن سهمیه یا اعتبار؛ «{m}» = نام مدل
+
+    @property
+    def model_key(self):
+        return self.key + "_model"
+
+    def ready(self, st):
+        """آیا کلیدهای لازم این بخش در تنظیمات وارد شده است؟"""
+        if self.key == "cf":
+            return bool((st.get("cf_account") or CF_ACCOUNT_ID).strip() and (st.get("cf_token") or CF_API_TOKEN).strip())
+        return bool((st.get(self.key + "_key") or "").strip())
+
+    def endpoint(self, backend):
+        """(آدرس، سرآیندها) درخواست گفتگو."""
+        if self.key == "or":
+            return ("https://openrouter.ai/api/v1/chat/completions",
+                    {"Authorization": "Bearer " + backend["or_key"], "X-Title": "SearchApp"})
+        if self.key == "hf":
+            return ("https://router.huggingface.co/v1/chat/completions",
+                    {"Authorization": "Bearer " + backend["hf_key"]})
+        return ("https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % backend["cf_account"],
+                {"Authorization": "Bearer " + backend["cf_token"]})
+
+
+PROVIDER_LIST = (
+    Provider(
+        key="cf", name="Cloudflare", tagline="Workers AI · سهمیه‌ی روزانه‌ی رایگان",
+        models=tuple(ModelOption(*m) for m in CF_CHOICES),
+        notes=("سهمیه‌ی روزانه‌ی Cloudflare طبق مستندات بین مدل‌ها مشترک است",
+               "و حدود ساعت ۰۳:۳۰ بامداد (به وقت ایران) تمدید می‌شود"),
+        quota_msg=("سهمیه‌ی مدل «{m}» تمام شده یا موقتاً محدود شده است. تا شارژ شدن صبر کنید "
+                   "(سهمیه‌ی روزانه حدود ساعت ۰۳:۳۰ بامداد به وقت ایران تمدید می‌شود) "
+                   "یا مدل دیگری را از بالای صفحه امتحان کنید."),
+    ),
+    Provider(
+        key="or", name="OpenRouter", tagline="مدل‌های رایگان (:free) و پولی از شرکت‌های مختلف",
+        models=tuple(ModelOption(*m) for m in OR_CHOICES),
+        notes=("مدل‌های رایگان (:free) طبق مستندات روزانه ۵۰ درخواست دارند",
+               "(با خرید ۱۰ دلار اعتبار: ۱٬۰۰۰). نام مدل‌ها ممکن است عوض شود"),
+        quota_msg=("سهمیه‌ی مدل «{m}» در OpenRouter تمام شده یا موقتاً محدود شده است. طبق مستندات، مدل‌های رایگان (:free) "
+                   "روزانه ۵۰ درخواست دارند (با خرید ۱۰ دلار اعتبار: ۱٬۰۰۰ درخواست). بعداً دوباره امتحان کنید "
+                   "یا مدل/بخش دیگری را از بالای صفحه انتخاب کنید."),
+    ),
+    Provider(
+        key="hf", name="Hugging Face", tagline="Inference Providers · اعتبار رایگان ماهانه",
+        models=tuple(ModelOption(*m) for m in HF_CHOICES),
+        notes=("حساب رایگان Hugging Face اعتبار ماهانه‌ی کمی دارد",
+               "و بعد از تمام‌شدنش خطای پرداخت (۴۰۲) می‌آید"),
+        quota_msg=("اعتبار Hugging Face برای «{m}» تمام شده است. اعتبار رایگان ماهانه‌ی کمی دارد؛ برای ادامه باید اعتبار بخرید، "
+                   "تا ماه بعد صبر کنید یا بخش دیگری را از بالای صفحه انتخاب کنید."),
+    ),
+)
+PROVIDER_MAP = {p.key: p for p in PROVIDER_LIST}
+PROVIDERS = [(p.key, p.name) for p in PROVIDER_LIST]
+PROVIDER_NAME = {p.key: p.name for p in PROVIDER_LIST}
+CHOICES = {p.key: p.models for p in PROVIDER_LIST}
+MODEL_KEY = {p.key: p.model_key for p in PROVIDER_LIST}
+
+
+def model_label(prov, model_id):
+    return next((m.label for m in CHOICES.get(prov, ()) if m.id == model_id), model_id)
+
+
+def active_provider():
+    return BACKEND.get("provider") if BACKEND.get("provider") in CHOICES else "cf"
+
+
+def active_model():
+    p = active_provider()
+    return BACKEND.get(MODEL_KEY[p]) or CHOICES[p][0].id
 
 CLOUD_URL = ""                       # آدرس Worker کلودفلر (اختیاری). خالی = غیرفعال
 CLOUD_KEY = ""                       # کلید ساده‌ی برنامه (APP_KEY در Worker؛ اختیاری)
@@ -109,8 +213,8 @@ WIKI_SUMMARY_URL = "https://fa.wikipedia.org/api/rest_v1/page/summary/"
 NO_RESULT_MSG = "پاسخی پیدا نشد."
 NO_CONNECTION_MSG = "اتصال به اینترنت برقرار نشد."
 TIMEOUT_MSG = "درخواست بیش از حد طول کشید. دوباره تلاش کنید."
-QUOTA_MSG = ("سهمیه‌ی مدل «{m}» تمام شده یا موقتاً محدود شده است. تا شارژ شدن صبر کنید "
-             "(سهمیه‌ی روزانه حدود ساعت ۰۳:۳۰ بامداد به وقت ایران تمدید می‌شود) یا مدل دیگری را از بالای صفحه امتحان کنید.")
+AUTH_MSG = ("کلید «{p}» نامعتبر است یا اجازه‌ی لازم را ندارد. از منو › تنظیمات اتصال، کلید را دوباره وارد کنید "
+            "(برای Hugging Face توکن باید اجازه‌ی Inference Providers داشته باشد).")
 PLAN_MSG = ("مدل «{m}» در پلن رایگان Cloudflare (Workers Free) در دسترس نیست و به پلن Workers Paid نیاز دارد. "
             "یا پلن را ارتقا بدهید، یا یکی از مدل‌های بدون علامت را از بالای صفحه انتخاب کنید.")
 MODEL_FAIL_MSG = "مدل «{m}» پاسخی نداد.\nدلیل: {e}\nمدل دیگری را از بالای صفحه انتخاب کنید."
@@ -147,7 +251,8 @@ Window.clearcolor = BG
 Window.softinput_mode = "below_target"
 
 # ═════════════════════════ انتخاب سرور: گوشی / کامپیوتر / ابر ═════════════════════════
-BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": "", "cf_model": CF_DEFAULT}
+BACKEND = {"url": OLLAMA_URL, "model": OLLAMA_MODEL, "pc": False, "cloud": False, "cf_account": "", "cf_token": "", "cf_model": CF_DEFAULT,
+           "provider": "cf", "or_key": "", "hf_key": "", "or_model": OR_CHOICES[0][1], "hf_model": HF_CHOICES[0][1]}
 
 
 UI = {"scale": 1.0}                  # اندازه‌ی متن گفتگو
@@ -203,11 +308,16 @@ def save_settings(data):
         pass
 
 
-def set_cf_model(model_id):
+def set_model(prov, model_id):
+    """مدل و بخش انتخاب‌شده را ذخیره می‌کند (بعدش apply_settings را صدا بزنید)."""
     st = load_settings()
-    st["cf_model"] = model_id
+    st[MODEL_KEY[prov]] = model_id
+    st["provider"] = prov
     save_settings(st)
-    BACKEND["cf_model"] = model_id
+
+
+def provider_ready(st, p):
+    return PROVIDER_MAP[p].ready(st)
 
 
 def apply_settings():
@@ -218,6 +328,9 @@ def apply_settings():
         UI["scale"] = float(st.get("font_scale", 1.0))
     except Exception:
         UI["scale"] = 1.0
+    prov = st.get("provider") if st.get("provider") in CHOICES else "cf"
+    if not provider_ready(st, prov):                     # اگر بخش انتخاب‌شده کلید ندارد، اولین بخشِ آماده
+        prov = next((p for p, _n in PROVIDERS if provider_ready(st, p)), None)
     pc = (st.get("pc_url") or "").strip()
     if pc:
         if not pc.startswith("http"):
@@ -225,11 +338,15 @@ def apply_settings():
         if ":" not in pc.split("//", 1)[1]:
             pc += ":11434"
         BACKEND.update(url=pc.rstrip("/"), model=(st.get("pc_model") or "qwen3:8b").strip(), pc=True, cloud=False)
-    elif (st.get("cf_account") or CF_ACCOUNT_ID).strip() and (st.get("cf_token") or CF_API_TOKEN).strip():
-        BACKEND.update(url="https://api.cloudflare.com", model="cf", pc=False, cloud="direct",
+    elif prov:
+        def pick_model(p):
+            m = (st.get(MODEL_KEY[p]) or "").strip()
+            return m or CHOICES[p][0].id
+        BACKEND.update(url="https://api.cloudflare.com", model="cf", pc=False, cloud="direct", provider=prov,
                        cf_account=(st.get("cf_account") or CF_ACCOUNT_ID).strip(),
                        cf_token=(st.get("cf_token") or CF_API_TOKEN).strip(),
-                       cf_model=(st.get("cf_model") if st.get("cf_model") in [m for _, m, _ in CF_CHOICES] else CF_DEFAULT))
+                       or_key=(st.get("or_key") or "").strip(), hf_key=(st.get("hf_key") or "").strip(),
+                       cf_model=pick_model("cf"), or_model=pick_model("or"), hf_model=pick_model("hf"))
     elif CLOUD_URL:
         BACKEND.update(url=CLOUD_URL.rstrip("/"), model="cloud", pc=False, cloud=True)
     elif SERVER_URL:
@@ -460,31 +577,60 @@ def strip_think(t):
     return _CJK.sub("", t).strip()
 
 
-QUOTA = {"hit": False, "plan": False}               # آیا آخرین خطا «تمام شدن سهمیه» بوده؟
+class ProviderError(Exception):
+    """خطای HTTP یکی از سرویس‌های ابری (با کد و متن پاسخ)."""
 
-
-class CFError(Exception):
-    def __init__(self, status, body):
+    def __init__(self, status, body=""):
         super().__init__("%s %s" % (status, body[:120]))
         self.status, self.body = status, body
+
+
+class AuthFailed(ProviderError):
+    """کلید یا توکن نامعتبر است (۴۰۱)."""
+
+
+class QuotaExceeded(ProviderError):
+    """سهمیه یا اعتبار تمام شده / محدودیت موقت (۴۲۹، ۴۰۲ یا پیام نورون)."""
+
+
+class PlanRestricted(ProviderError):
+    """مدل در پلن رایگان Cloudflare نیست (۴۰۳)."""
+
+
+def classify_error(prov, status, body):
+    low = (body or "").lower()
+    if status == 401:
+        return AuthFailed(status, body)
+    if status in (429, 402) or "neuron" in low or "4006" in (body or ""):
+        return QuotaExceeded(status, body)
+    if prov == "cf" and status == 403 and "not available" in low and "free" in low:
+        return PlanRestricted(status, body)
+    return ProviderError(status, body)
+
+
+class Reply(NamedTuple):
+    text: str
+    cut: bool       # آیا جواب به‌خاطر سقف توکن قطع شده؟
+    info: dict      # اطلاعات تشخیصی (مدل، توکن‌ها، ...)
 
 
 DEBUG = {"line": ""}                 # خط تشخیصی که زیر جواب نشان داده می‌شود
 SHOW_DEBUG = False                   # برای دیدن خط تشخیصی زیر جواب: True
 
 
-def _cf_call(model, msgs, max_tokens, temperature):
-    """یک درخواست به Cloudflare Workers AI (آدرس سازگار با OpenAI = فرمت یکسان برای همه‌ی مدل‌ها)."""
+def _chat_call(model, msgs, max_tokens, temperature):
+    """یک درخواست گفتگو به بخش فعال (Cloudflare / OpenRouter / Hugging Face)."""
+    prov = active_provider()
     for key, (mult, floor) in REASONING_BOOST.items():
         if key in model:
             max_tokens = max(max_tokens * mult, floor)
             break
+    url, hdr = PROVIDER_MAP[prov].endpoint(BACKEND)
     r = requests.post(
-        "https://api.cloudflare.com/client/v4/accounts/%s/ai/v1/chat/completions" % BACKEND["cf_account"],
-        json={"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
-        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=240)
+        url, json={"model": model, "messages": msgs, "max_tokens": max_tokens, "temperature": temperature},
+        headers=hdr, timeout=240)
     if r.status_code >= 400:
-        raise CFError(r.status_code, r.text or "")
+        raise classify_error(prov, r.status_code, r.text or "")
     data = r.json()
     res = data.get("result") or data
     ch = (res.get("choices") or [{}])[0]
@@ -500,7 +646,53 @@ def _cf_call(model, msgs, max_tokens, temperature):
         cut = True
     info = {"model": model.split("/")[-1], "finish": finish, "tokens": ctoks, "max": max_tokens,
             "raw_len": len(str(raw)), "len": len(text)}
-    return text, cut, info
+    return Reply(text, cut, info)
+
+
+def _cloud_ask(messages, temperature, max_tokens, push=None, cancel=None):
+    """گفتگو با مدل بخش انتخاب‌شده؛ شامل تلاش دوباره‌ی جواب خالی و ادامه‌ی جواب قطع‌شده."""
+    DEBUG["line"] = ""
+    prov, model = active_provider(), active_model()          # فقط همان مدلی که کاربر انتخاب کرده
+    is_qwen = prov == "cf" and "qwen3-" in model              # فقط Qwen3 قدیمی دستور /no_think را می‌فهمد؛ qwen3.8 با فکرِ پیش‌فرض کار می‌کند
+    msgs = [dict(m) for m in messages]
+    if is_qwen:
+        for m in reversed(msgs):
+            if m["role"] == "user":
+                m["content"] += " /no_think"
+                break
+    try:
+        reply = _chat_call(model, msgs, max_tokens, temperature)
+        if not reply.text:                                    # مدل‌های «فکرکن» گاهی همه‌ی توکن را صرف فکر می‌کنند
+            reply = _chat_call(model, msgs, max_tokens * 2, temperature)
+        text, cut, info = reply
+        n = 0
+        while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
+            n += 1
+            if push:
+                push(text)
+            nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
+            if is_qwen:
+                nxt += " /no_think"
+            more = _chat_call(
+                model,
+                msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
+                max_tokens, temperature)
+            cut = more.cut
+            if not more.text:
+                break
+            text += (" " if not text.endswith("\n") else "") + more.text
+        if text:
+            DEBUG["line"] = "model=%s finish=%s tokens=%s/%s chars=%s continues=%d" % (
+                info["model"], info["finish"], info["tokens"], info["max"], len(text), n)
+            if push:
+                push(text)
+            return text
+    except Exception as e:
+        DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:100])
+        raise
+    DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
+        info["model"], info["finish"], info["tokens"], info["raw_len"])
+    raise ValueError("empty answer")
 
 
 def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, cancel=None):
@@ -508,55 +700,7 @@ def ask_ollama(system, user, temperature, max_tokens, push=None, history=None, c
     messages += list(history or [])
     messages.append({"role": "user", "content": user})
     if BACKEND.get("cloud") == "direct":
-        DEBUG["line"] = ""
-        QUOTA["hit"] = False
-        QUOTA["plan"] = False
-        model = BACKEND.get("cf_model") or CF_DEFAULT       # فقط همان مدلی که کاربر انتخاب کرده
-        QUOTA["model"] = cf_label(model)
-        is_qwen = "qwen3-" in model      # فقط Qwen3 قدیمی دستور /no_think را می‌فهمد؛ qwen3.8 با فکرِ پیش‌فرض خودش کار می‌کند
-        msgs = [dict(m) for m in messages]
-        if is_qwen:
-            for m in reversed(msgs):
-                if m["role"] == "user":
-                    m["content"] += " /no_think"
-                    break
-        try:
-            text, cut, info = _cf_call(model, msgs, max_tokens, temperature)
-            if not text:                                  # مدل‌های «فکرکن» گاهی همه‌ی توکن را صرف فکر می‌کنند
-                text, cut, info = _cf_call(model, msgs, max_tokens * 2, temperature)
-            n = 0
-            # اگر جواب به‌خاطر سقف توکن قطع شد، ادامه‌اش را بگیر
-            while text and cut and n < MAX_CONTINUE and not (cancel is not None and cancel.is_set()):
-                n += 1
-                if push:
-                    push(text)
-                nxt = "ادامه بده؛ دقیقاً از همان‌جا که قطع شد، بدون تکرار."
-                if is_qwen:
-                    nxt += " /no_think"
-                more, cut, _i = _cf_call(
-                    model,
-                    msgs + [{"role": "assistant", "content": text}, {"role": "user", "content": nxt}],
-                    max_tokens, temperature)
-                if not more:
-                    break
-                text += (" " if not text.endswith("\n") else "") + more
-            if text:
-                DEBUG["line"] = "model=%s finish=%s tokens=%s/%s chars=%s continues=%d" % (
-                    info["model"], info["finish"], info["tokens"], info["max"], len(text), n)
-                if push:
-                    push(text)
-                return text
-        except Exception as e:
-            body = getattr(e, "body", "") or ""
-            DEBUG["line"] = "ERROR %s: %s" % (model.split("/")[-1], str(e)[:100])
-            if getattr(e, "status", None) == 429 or "neuron" in body.lower() or "4006" in body:
-                QUOTA["hit"] = True
-            if getattr(e, "status", None) == 403 and "not available" in body.lower() and "free" in body.lower():
-                QUOTA["plan"] = True
-            raise
-        DEBUG["line"] = "EMPTY from %s finish=%s tokens=%s raw=%s" % (
-            info["model"], info["finish"], info["tokens"], info["raw_len"])
-        raise ValueError("empty answer")
+        return _cloud_ask(messages, temperature, max_tokens, push, cancel)
     if BACKEND.get("cloud"):
         r = requests.post(BACKEND["url"] + "/chat",
                           json={"messages": messages, "temperature": temperature, "max_tokens": max_tokens},
@@ -784,15 +928,19 @@ def _ask_impl(query, push=None, history=None, cancel=None, stage=None):
         raise ValueError("empty")
     except requests.exceptions.Timeout:
         return {"text": TIMEOUT_MSG, "title": None, "error": True}
-    except Exception:
+    except Exception as e:
         if BACKEND.get("cloud") == "direct":
-            name = cf_label(BACKEND.get("cf_model") or CF_DEFAULT)
-            if QUOTA["hit"]:
-                return {"text": QUOTA_MSG.replace("{m}", name), "title": None, "error": True}
-            if QUOTA["plan"]:
-                return {"text": PLAN_MSG.replace("{m}", name), "title": None, "error": True}
-            return {"text": MODEL_FAIL_MSG.replace("{m}", name).replace("{e}", DEBUG["line"][:140] or "نامشخص"),
-                    "title": None, "error": True}
+            prov = active_provider()
+            name = model_label(prov, active_model())
+            if isinstance(e, AuthFailed):
+                msg = AUTH_MSG.replace("{p}", PROVIDER_NAME[prov])
+            elif isinstance(e, QuotaExceeded):
+                msg = PROVIDER_MAP[prov].quota_msg.replace("{m}", name)
+            elif isinstance(e, PlanRestricted):
+                msg = PLAN_MSG.replace("{m}", name)
+            else:
+                msg = MODEL_FAIL_MSG.replace("{m}", name).replace("{e}", DEBUG["line"][:140] or "نامشخص")
+            return {"text": msg, "title": None, "error": True}
         if mode == "chat" and len(q) >= 6:           # بدون مدل: دست‌کم از ویکی‌پدیا جواب بده
             try:
                 info = research_lookup(extract_topic(q), q, None, None)
@@ -1029,6 +1177,25 @@ class Chip(TapCard):
         self.add_widget(SLabel(text, font_size=sp(11.5), color=MUTED, halign="center"))
 
 
+class ProviderChip(TapCard):
+    """دکمه‌ی یک بخش (Cloudflare / OpenRouter / Hugging Face) در نوار بالا. نقطه‌ی سبز = کلید وارد شده."""
+
+    def __init__(self, name, **kwargs):
+        super().__init__(bg=SURFACE, border=BORDER, radius=12, padding=[dp(10), 0], spacing=dp(6), **kwargs)
+        self.dot = Dot(RED, size_hint=(None, None), size=(dp(7), dp(7)), pos_hint={"center_y": 0.5})
+        self.lbl = SLabel(name, font_size=sp(12), color=MUTED, halign="center", shorten=True)
+        self.add_widget(self.dot)
+        self.add_widget(self.lbl)
+
+    def refresh(self, active, ready):
+        self.bg = ACCENT if active else SURFACE
+        self.border = ACCENT_2 if active else BORDER
+        self.set_bg(self.bg)
+        self.set_border(self.border)
+        self.dot.set_color(GREEN if ready else RED)
+        self.lbl.color = WHITE if active else MUTED
+
+
 class Avatar(Card):
     """آواتار کوچک دستیار کنار حباب جواب."""
 
@@ -1238,12 +1405,19 @@ class SearchApp(App):
         divider.bind(pos=lambda w, v: setattr(rect, "pos", v), size=lambda w, v: setattr(rect, "size", v))
         root.add_widget(divider)
 
-        self.model_wrap = BoxLayout(size_hint_y=None, height=dp(42), padding=[dp(14), dp(4)])
-        self.model_bar = TapCard(bg=SURFACE, border=BORDER, radius=12, padding=[dp(12), 0])
-        self.model_lbl = SLabel("", font_size=sp(12.5), color=MUTED, shorten=True)
-        self.model_bar.add_widget(self.model_lbl)
-        self.model_bar.bind(on_release=lambda *_: self.open_model_picker())
-        self.model_wrap.add_widget(self.model_bar)
+        self.model_wrap = BoxLayout(orientation="vertical", size_hint_y=None, height=dp(66),
+                                    padding=[dp(14), dp(4), dp(14), 0], spacing=dp(2))
+        prov_row = BoxLayout(size_hint_y=None, height=dp(38), spacing=dp(6))
+        self.prov_chips = {}
+        for prov in PROVIDER_LIST:
+            chip = ProviderChip(prov.name)
+            chip.bind(on_release=lambda w, k=prov.key: self.open_provider(k))
+            self.prov_chips[prov.key] = chip
+            prov_row.add_widget(chip)
+        self.model_lbl = SLabel("", font_size=sp(11.5), color=MUTED, halign="center",
+                                size_hint_y=None, height=dp(20), shorten=True)
+        self.model_wrap.add_widget(prov_row)
+        self.model_wrap.add_widget(self.model_lbl)
         root.add_widget(self.model_wrap)
 
         self.scroll = ScrollView(do_scroll_x=False, bar_width=dp(3),
@@ -1303,14 +1477,21 @@ class SearchApp(App):
 
         local = BACKEND["url"].startswith("http://127.0.0.1")
         if BACKEND.get("cloud") == "direct":
-            # یک درخواست واقعی و کوچک: هم اتصال و هم صحت Account ID و توکن را می‌سنجد
+            prov = active_provider()
             for _ in range(3):
                 try:
-                    r = requests.post(
-                        "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s"
-                        % (BACKEND["cf_account"], CF_WARM_MODEL),
-                        json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
-                        headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=15)
+                    if prov == "or":      # بدون هزینه: فقط اعتبار کلید را می‌پرسد
+                        r = requests.get("https://openrouter.ai/api/v1/key",
+                                         headers={"Authorization": "Bearer " + BACKEND["or_key"]}, timeout=15)
+                    elif prov == "hf":
+                        r = requests.get("https://huggingface.co/api/whoami-v2",
+                                         headers={"Authorization": "Bearer " + BACKEND["hf_key"]}, timeout=15)
+                    else:                 # یک درخواست واقعی و کوچک: هم اتصال و هم صحت Account ID و توکن
+                        r = requests.post(
+                            "https://api.cloudflare.com/client/v4/accounts/%s/ai/run/%s"
+                            % (BACKEND["cf_account"], CF_WARM_MODEL),
+                            json={"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1},
+                            headers={"Authorization": "Bearer " + BACKEND["cf_token"]}, timeout=15)
                     if r.status_code == 200:
                         st("ready")
                         return
@@ -1356,11 +1537,17 @@ class SearchApp(App):
     # ---------- انتخاب مدل هوش مصنوعی ----------
 
     def _refresh_model_bar(self):
+        """وضعیت دکمه‌های بخش‌ها و نام مدل فعال را به‌روز می‌کند."""
+        st = load_settings()
         direct = BACKEND.get("cloud") == "direct"
-        self.model_wrap.height = dp(42) if direct else 0
-        self.model_wrap.opacity = 1 if direct else 0
-        self.model_wrap.disabled = not direct
-        self.model_lbl.text = shape("مدل هوش مصنوعی:  " + cf_label(BACKEND.get("cf_model") or CF_DEFAULT))
+        show = (direct or any(p.ready(st) for p in PROVIDER_LIST)) and not BACKEND.get("pc")
+        self.model_wrap.height = dp(66) if show else 0
+        self.model_wrap.opacity = 1 if show else 0
+        self.model_wrap.disabled = not show
+        cur = active_provider() if direct else None
+        for p in PROVIDER_LIST:
+            self.prov_chips[p.key].refresh(p.key == cur, p.ready(st))
+        self.model_lbl.text = shape("%s · %s" % (PROVIDER_NAME[cur], model_label(cur, active_model()))) if cur else ""
 
     # ---------- پنجره‌ها ----------
     def _popup(self, title, content, height):
@@ -1400,42 +1587,82 @@ class SearchApp(App):
             ("گفتگوهای قبلی", "%d گفتگوی ذخیره‌شده" % len(self.chats), self.open_history),
             ("حالت دستیار", pname, self.open_persona),
             ("اندازه‌ی متن", fname, self.open_fontsize),
-            ("تنظیمات اتصال", "Cloudflare / کامپیوتر", self.open_settings),
+            ("تنظیمات اتصال", "Cloudflare / OpenRouter / Hugging Face", self.open_settings),
         ]
         for t, h, cb in items:
             box.add_widget(self._menu_item(t, h, cb, pop))
         box.add_widget(Widget())
         pop.open()
 
-    def open_model_picker(self):
-        cur = BACKEND.get("cf_model") or CF_DEFAULT
+    def open_provider(self, prov_key):
+        """فهرست مدل‌های یک بخش؛ با لمس هر مدل، همان بخش و مدل فعال می‌شود."""
+        provider = PROVIDER_MAP[prov_key]
+        st = load_settings()
+        cur = BACKEND.get(provider.model_key) if active_provider() == prov_key else None
         box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
-        pop = self._popup("انتخاب مدل هوش مصنوعی", box, dp(560))
+        pop = self._popup(provider.name, box, dp(580))
+        box.add_widget(SLabel(provider.tagline, font_size=sp(12), color=MUTED, halign="center",
+                              size_hint_y=None, height=dp(22), shorten=True))
 
         def pick(_w, mid):
-            set_cf_model(mid)
+            set_model(prov_key, mid)
+            apply_settings()
             self._refresh_model_bar()
             pop.dismiss()
+            self.warm_up()
+
+        if not provider.ready(st):
+            hint = TapCard(bg=ERR_BG, border=ERR_BORDER, radius=14, size_hint_y=None, height=dp(64),
+                           padding=[dp(14), 0])
+            hint.add_widget(SLabel("کلید %s وارد نشده؛ برای وارد کردن اینجا را لمس کنید" % provider.name,
+                                   font_size=sp(12.5), color=ERR_TEXT, halign="center", shorten=True))
+
+            def to_settings(*_):
+                pop.dismiss()
+                Clock.schedule_once(lambda dt: self.open_settings(), 0.1)
+            hint.bind(on_release=to_settings)
+            box.add_widget(hint)
+            box.add_widget(Widget())
+            pop.open()
+            return
 
         items = BoxLayout(orientation="vertical", spacing=dp(8), size_hint_y=None)
         items.bind(minimum_height=items.setter("height"))
-        for label, mid, size in CF_CHOICES:
+        for label, mid, size in provider.models:
             sel = (mid == cur)
             card = TapCard(bg=ACCENT if sel else SURFACE, border=ACCENT_2 if sel else BORDER, radius=14,
                            size_hint_y=None, height=dp(54), padding=[dp(14), 0], spacing=dp(8))
             card.add_widget(SLabel(size, font_size=sp(11.5), color=WHITE if sel else MUTED,
                                    size_hint_x=None, width=dp(60), halign="left"))
-            card.add_widget(SLabel(label, font_size=sp(14.5), color=WHITE if sel else TEXT, shorten=True))
+            card.add_widget(SLabel(label, font_size=sp(14), color=WHITE if sel else TEXT, shorten=True))
             card.bind(on_release=lambda w, m=mid: pick(w, m))
+            items.add_widget(card)
+        if cur and cur not in [m.id for m in provider.models]:          # مدل دلخواهِ فعلی
+            card = TapCard(bg=ACCENT, border=ACCENT_2, radius=14, size_hint_y=None, height=dp(54), padding=[dp(14), 0])
+            card.add_widget(SLabel(cur, font_size=sp(13), color=WHITE, shorten=True))
             items.add_widget(card)
         sv = ScrollView(do_scroll_x=False, bar_width=dp(3),
                         bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
         sv.add_widget(items)
         box.add_widget(sv)
-        box.add_widget(SLabel("سهمیه‌ی روزانه‌ی Cloudflare طبق مستندات بین مدل‌ها مشترک است", font_size=sp(11),
-                              color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
-        box.add_widget(SLabel("و حدود ساعت ۰۳:۳۰ بامداد (به وقت ایران) تمدید می‌شود", font_size=sp(11),
-                              color=MUTED, size_hint_y=None, height=dp(22), shorten=True))
+
+        custom = TextInput(hint_text="شناسه‌ی مدل دلخواه (مثلاً org/model-name)", hint_text_color=MUTED,
+                           multiline=False, foreground_color=TEXT, cursor_color=ACCENT_2,
+                           background_normal="", background_active="", background_color=SURFACE,
+                           font_name=FONT, font_size=sp(13), size_hint_y=None, height=dp(42),
+                           padding=[dp(12), dp(10)])
+        use = TapCard(bg=ACCENT, border=ACCENT, radius=14, size_hint_y=None, height=dp(42))
+        use.add_widget(SLabel("استفاده از این شناسه", font_size=sp(13), color=WHITE, halign="center"))
+
+        def use_custom(*_):
+            mid = custom.text.strip()
+            if mid:
+                pick(None, mid)
+        use.bind(on_release=use_custom)
+        box.add_widget(custom)
+        box.add_widget(use)
+        for line in provider.notes:
+            box.add_widget(SLabel(line, font_size=sp(11), color=MUTED, size_hint_y=None, height=dp(20), shorten=True))
         pop.open()
 
     def open_persona(self):
@@ -1539,9 +1766,9 @@ class SearchApp(App):
     def open_settings(self):
         st = load_settings()
 
-        def field(text, hint):
+        def field(text, hint, secret=False):
             return TextInput(
-                text=text, hint_text=hint, hint_text_color=MUTED, multiline=False,
+                text=text, hint_text=hint, hint_text_color=MUTED, multiline=False, password=secret,
                 foreground_color=TEXT, cursor_color=ACCENT_2, background_normal="", background_active="",
                 background_color=SURFACE, font_name=FONT, font_size=sp(14),
                 size_hint_y=None, height=dp(42), padding=[dp(12), dp(10)])
@@ -1549,30 +1776,36 @@ class SearchApp(App):
         def lab(t):
             return SLabel(t, font_size=sp(12), color=MUTED, size_hint_y=None, height=dp(22))
 
-        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(5))
-        box.add_widget(lab("Cloudflare: شناسه‌ی حساب (Account ID)"))
+        form = BoxLayout(orientation="vertical", spacing=dp(5), size_hint_y=None)
+        form.bind(minimum_height=form.setter("height"))
         cf_acc = field(st.get("cf_account", ""), "Account ID")
-        box.add_widget(cf_acc)
-        box.add_widget(lab("Cloudflare: توکن (API Token)"))
-        cf_tok = field(st.get("cf_token", ""), "API Token")
-        box.add_widget(cf_tok)
-        box.add_widget(lab("یا آدرس Ollama روی کامپیوتر (اختیاری)"))
+        cf_tok = field(st.get("cf_token", ""), "API Token", True)
+        or_key = field(st.get("or_key", ""), "sk-or-v1-...", True)
+        hf_key = field(st.get("hf_key", ""), "hf_...", True)
         url_in = field(st.get("pc_url", ""), "192.168.1.23:11434")
-        box.add_widget(url_in)
-        box.add_widget(lab("نام مدل روی کامپیوتر"))
         model_in = field(st.get("pc_model", "qwen3:8b"), "qwen3:8b")
-        box.add_widget(model_in)
+        for text, w in (("Cloudflare: شناسه‌ی حساب (Account ID)", cf_acc),
+                        ("Cloudflare: توکن (API Token)", cf_tok),
+                        ("OpenRouter: کلید (API Key)", or_key),
+                        ("Hugging Face: توکن (با دسترسی Inference)", hf_key),
+                        ("یا آدرس Ollama روی کامپیوتر (اختیاری)", url_in),
+                        ("نام مدل روی کامپیوتر", model_in)):
+            form.add_widget(lab(text))
+            form.add_widget(w)
+        sv = ScrollView(do_scroll_x=False, bar_width=dp(3),
+                        bar_color=(*ACCENT[:3], 0.45), bar_inactive_color=(*ACCENT[:3], 0.0))
+        sv.add_widget(form)
 
+        box = BoxLayout(orientation="vertical", padding=dp(14), spacing=dp(8))
+        box.add_widget(sv)
         row = BoxLayout(size_hint_y=None, height=dp(46), spacing=dp(10))
-        pop = Popup(title=shape("تنظیمات اتصال"), title_font=FONT, title_color=TEXT,
-                    separator_height=0, content=box, size_hint=(0.94, None), height=dp(520),
-                    background="", background_color=(0.08, 0.09, 0.15, 1), auto_dismiss=True)
+        pop = self._popup("تنظیمات اتصال", box, dp(600))
 
         def save(*_):
             cur = load_settings()
             cur.update({"cf_account": cf_acc.text.strip(), "cf_token": cf_tok.text.strip(),
-                        "pc_url": url_in.text.strip(),
-                        "pc_model": model_in.text.strip() or "qwen3:8b"})
+                        "or_key": or_key.text.strip(), "hf_key": hf_key.text.strip(),
+                        "pc_url": url_in.text.strip(), "pc_model": model_in.text.strip() or "qwen3:8b"})
             save_settings(cur)
             apply_settings()
             self._refresh_model_bar()
@@ -1596,9 +1829,6 @@ class SearchApp(App):
         row.add_widget(b_clear)
         box.add_widget(row)
         pop.open()
-
-    # ---------- حباب‌ها ----------
-
 
     # ---------- صفحه‌ی خوش‌آمد ----------
     def _show_welcome(self):
